@@ -61,6 +61,7 @@ from karyoscope.core.scaffold import (
     DEFAULT_HUMAN_ACROCENTRICS,
     DEFAULT_MIN_SCAFFOLD_LENGTH,
     DEFAULT_SCAFFOLD_GAP_SIZE,
+    GRAMMARS,
     ContigInput,
     _to_agp_objects,
     classify_and_orient,
@@ -178,13 +179,36 @@ class ScaffoldResult:
 # --- helpers --------------------------------------------------------
 
 
-def _resolve_roles(manifest_roles: dict[str, str], available: list[str]) -> tuple[str, str]:
+def _resolve_roles(
+    manifest_roles: dict[str, str],
+    available: list[str],
+    *,
+    label_grammar: str = "plain",
+) -> tuple[str, str]:
     """Pick the chromosome- and region-assignment feature sets.
 
     Falls back to literal names with a warning when the manifest omits
     them. Errors when the resolved set is not declared in
     ``available``.
+
+    Under the ``cytoband`` grammar one feature set serves BOTH roles: a cytoband
+    label carries the chromosome and the arm at once (``Yq12`` -> chrY, q), which
+    is the whole reason for that grammar. A cytoband-only database therefore has
+    no ``chromosome``/``region`` sets to fall back to, so resolve both roles to
+    the cytoband set unless the manifest says otherwise.
     """
+    if label_grammar == "cytoband":
+        cyto = manifest_roles.get("chromosome_assignment") or next(
+            (fs for fs in available if "cytoband" in fs), None
+        )
+        if cyto is None:
+            raise ScaffoldError(
+                "--label-grammar cytoband needs a cytoband feature set; this "
+                f"database declares {available!r}. Point --db at a cytoband database."
+            )
+        region = manifest_roles.get("region_assignment") or cyto
+        return cyto, region
+
     chrom_set = manifest_roles.get("chromosome_assignment")
     if chrom_set is None:
         chrom_set = "chromosome"
@@ -590,6 +614,7 @@ def scaffold_run(
     output_dir: Path | None = None,
     write_scaffolded_beds: bool = True,
     annotation_variant: str = "smoothed",
+    label_grammar: str = "plain",
     progress: Progress = SILENT,
 ) -> dict[str, ScaffoldResult]:
     """Run the full ``karyoscope scaffold`` pipeline.
@@ -663,7 +688,9 @@ def scaffold_run(
     manifest = validate_database_layout(db_dir)
     available = list(manifest.feature_sets)
 
-    chromosome_fs, region_fs = _resolve_roles(manifest.roles, available)
+    chromosome_fs, region_fs = _resolve_roles(
+        manifest.roles, available, label_grammar=label_grammar
+    )
     if mode == "fasta":
         # FASTA-only mode never writes per-feature-set scaffolded BEDs,
         # so there's no point requesting them from annotate. The role
@@ -842,6 +869,7 @@ def scaffold_run(
         chromosome_leaves=chromosome_leaves,
         acrocentrics=acros_set,
         min_scaffold_length=min_scaffold_length,
+        grammar=GRAMMARS[label_grammar],
     )
     logger.info(
         "classified %d scaffold row(s) in %.1fs",

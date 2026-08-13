@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import gzip
 import logging
+import re
 import shutil
 import tempfile
 from collections import defaultdict
@@ -100,6 +101,79 @@ class ContigInput:
 # --- pure helpers ---------------------------------------------------
 
 
+#: Cytoband label -> (chromosome token, arm). ``13q21.1`` -> ``("13", "q")``;
+#: a bare chromosome token like ``13`` -> ``("13", None)``.
+_CYTOBAND_RE = re.compile(r"^(?:chr)?([0-9]{1,2}|X|Y|M)(?:([pq])[0-9.]*)?$")
+
+
+def parse_cytoband_label(label: str) -> tuple[str | None, str | None]:
+    """Split a cytoband label into its chromosome token and arm.
+
+    Returns ``(None, None)`` for anything that is not a cytoband -- hierarchy
+    internal nodes, ``novel``, ``categorized`` -- so callers can treat those as
+    "no information" exactly as they do for the region feature set.
+    """
+    m = _CYTOBAND_RE.match(label)
+    if not m:
+        return None, None
+    return m.group(1), m.group(2)
+
+
+class LabelGrammar:
+    """How to read chromosome identity and arm out of a feature label.
+
+    The scaffolder needs two facts per bin: which chromosome the label belongs to
+    (for :func:`assign_main_chromosome`) and which arm it is on (for orientation).
+    Where those facts live depends on the feature set, so the grammar is pluggable
+    rather than assumed.
+    """
+
+    name = "plain"
+
+    def chromosome_of(self, label: str) -> str | None:
+        """Chromosome for ``label``, or None when it carries no chromosome identity."""
+        return label
+
+    def simple_region(self, label: str) -> str:
+        return get_simple_region(label)
+
+
+class CytobandGrammar(LabelGrammar):
+    """Read both facts straight off a cytoband label (``Yq12``, ``13p11.2``).
+
+    This exists because the region feature set cannot supply the arm reliably.
+    ``get_simple_region`` routes every satellite class into its ``centromere``
+    catch-all, so a distal heterochromatic block -- Yq12 above all, but also 1qh,
+    9qh, 16qh -- stops counting as arm material. Measured on an HG002-era chrY
+    contig, the v2 region set leaves only 35.5% of the contig arm-labelled against
+    ~85-89% for every other chromosome, and the orientation vote is then decided by
+    noise. The same contig is 98% arm-labelled under cytoband, because the arm is
+    *in the label* and the satellite class is irrelevant.
+
+    Caveat: cytoband is not uniformly better. Acrocentric short arms resolve poorly
+    (measured 30-48% arm-labelled), so this grammar is a choice, not a default.
+    """
+
+    name = "cytoband"
+
+    def chromosome_of(self, label: str) -> str | None:
+        token, _ = parse_cytoband_label(label)
+        return f"chr{token}" if token else None
+
+    def simple_region(self, label: str) -> str:
+        _, arm = parse_cytoband_label(label)
+        if arm == "p":
+            return "p_arm"
+        if arm == "q":
+            return "q_arm"
+        return get_simple_region(label)
+
+
+#: Grammar name -> instance. ``plain`` preserves existing behaviour exactly.
+GRAMMARS: dict[str, LabelGrammar] = {"plain": LabelGrammar(), "cytoband": CytobandGrammar()}
+DEFAULT_GRAMMAR = GRAMMARS["plain"]
+
+
 def get_simple_region(feature_name: str) -> str:
     """Project a region feature name down to a coarse category.
 
@@ -129,6 +203,7 @@ def assign_main_chromosome(
     chromosome_leaves: set[str],
     *,
     mass: Mapping[str, int] | None = None,
+    grammar: LabelGrammar = DEFAULT_GRAMMAR,
 ) -> str | None:
     """Pick the leaf chromosome with the largest weighted overlap.
 
@@ -148,15 +223,27 @@ def assign_main_chromosome(
     ignored. Ties broken by the natural :func:`chromosome_sort_key` ordering
     so the result is deterministic when two leaves have identical coverage.
     """
+
+    def _chrom(name: str) -> str | None:
+        """Which chromosome this label votes for, or None for no information.
+
+        Under the cytoband grammar the leaves are sub-bands (``13q21.1``), so the
+        vote has to be aggregated up to the chromosome; under the plain grammar
+        the leaf already IS the chromosome and this is the identity.
+        """
+        if name not in chromosome_leaves:
+            return None
+        return grammar.chromosome_of(name)
+
     counts: dict[str, int] = defaultdict(int)
     if mass is not None:
         for name, bp in mass.items():
-            if name in chromosome_leaves:
-                counts[name] += bp
+            if (c := _chrom(name)) is not None:
+                counts[c] += bp
     else:
         for start, stop, name in chromosome_bins:
-            if name in chromosome_leaves:
-                counts[name] += stop - start
+            if (c := _chrom(name)) is not None:
+                counts[c] += stop - start
     if not counts:
         return None
     best_overlap = max(counts.values())
@@ -183,6 +270,8 @@ def find_largest_contiguous_region(
     chromosome_bins: list[Interval],
     main_chromosome: str | None,
     chromosome_leaves: set[str],
+    *,
+    grammar: LabelGrammar = DEFAULT_GRAMMAR,
 ) -> tuple[int, int]:
     """Find the longest run of bins compatible with ``main_chromosome``.
 
@@ -256,6 +345,8 @@ def half_region_totals(
     region_bins: Iterable[Interval],
     region_start: int,
     region_end: int,
+    *,
+    grammar: LabelGrammar = DEFAULT_GRAMMAR,
 ) -> dict[str, list[int]]:
     """Split the ``[region_start, region_end)`` window in half and tally bp per category.
 
@@ -278,7 +369,7 @@ def half_region_totals(
         oend = min(stop, region_end)
         if oend <= ostart:
             continue
-        simple = get_simple_region(name)
+        simple = grammar.simple_region(name)
         if simple not in out:
             continue
         first_len = max(min(breakpoint, oend) - ostart, 0)
@@ -292,6 +383,8 @@ def scaffold_region_majority(
     region_bins: Iterable[Interval],
     region_start: int,
     region_end: int,
+    *,
+    grammar: LabelGrammar = DEFAULT_GRAMMAR,
 ) -> str:
     """Return the simple-region category that dominates the window.
 
@@ -304,7 +397,7 @@ def scaffold_region_majority(
         oend = min(stop, region_end)
         if oend <= ostart:
             continue
-        counts[get_simple_region(name)] += oend - ostart
+        counts[grammar.simple_region(name)] += oend - ostart
     if not counts:
         return ""
     return max(counts, key=lambda k: counts[k])
@@ -319,6 +412,7 @@ def need_to_flip(
     scaffold_length: int,
     telo: TeloFlags,
     is_acrocentric: bool,
+    grammar: LabelGrammar = DEFAULT_GRAMMAR,
 ) -> bool:
     """Decide whether the contig is reversed (q-then-p) and should be flipped.
 
@@ -331,7 +425,7 @@ def need_to_flip(
     ladder over arm/centromere composition and telomere placement; see
     the inline comments for the intuition behind each branch.
     """
-    simple_region = scaffold_region_majority(region_bins, region_start, region_end)
+    simple_region = scaffold_region_majority(region_bins, region_start, region_end, grammar=grammar)
 
     has_start_tel = telo.start
     has_stop_tel = telo.stop
@@ -383,7 +477,7 @@ def need_to_flip(
                 continue
             midpoint = (ostart + oend) / 2
             length = oend - ostart
-            simple = get_simple_region(name)
+            simple = grammar.simple_region(name)
             if simple == "p_arm":
                 p_weighted += midpoint * length
             elif simple == "q_arm":
@@ -461,6 +555,8 @@ def _stats_string(
     region_end: int,
     has_start_tel: bool,
     has_stop_tel: bool,
+    *,
+    grammar: LabelGrammar = DEFAULT_GRAMMAR,
 ) -> str:
     """Build the TPCQT-style summary string for one contig.
 
@@ -476,7 +572,7 @@ def _stats_string(
         oend = min(stop, region_end)
         if oend <= ostart:
             continue
-        simple = get_simple_region(name)
+        simple = grammar.simple_region(name)
         if simple == "p_arm":
             chars.append("P")
         elif simple == "centromere":
@@ -514,11 +610,12 @@ def _orient(
     main_chromosome: str,
     chromosome_leaves: set[str],
     acrocentrics: set[str],
+    grammar: LabelGrammar = DEFAULT_GRAMMAR,
 ) -> _OrientedContig:
     region_start, region_end = find_largest_contiguous_region(
-        contig.chromosome_bins, main_chromosome, chromosome_leaves
+        contig.chromosome_bins, main_chromosome, chromosome_leaves, grammar=grammar
     )
-    halfs = half_region_totals(contig.region_bins, region_start, region_end)
+    halfs = half_region_totals(contig.region_bins, region_start, region_end, grammar=grammar)
     flipped = need_to_flip(
         contig.region_bins,
         halfs,
@@ -527,6 +624,7 @@ def _orient(
         scaffold_length=contig.length,
         telo=contig.telo,
         is_acrocentric=main_chromosome in acrocentrics,
+        grammar=grammar,
     )
 
     if flipped:
@@ -541,7 +639,9 @@ def _orient(
         flipped_region_end = contig.length - region_start
         # Recompute half-totals on the flipped data so downstream
         # consumers (category_index, stats string) see the oriented view.
-        halfs = half_region_totals(flipped_bins, flipped_region_start, flipped_region_end)
+        halfs = half_region_totals(
+            flipped_bins, flipped_region_start, flipped_region_end, grammar=grammar
+        )
         return _OrientedContig(
             contig=contig,
             chromosome=main_chromosome,
@@ -571,6 +671,7 @@ def classify_and_orient(
     chromosome_leaves: set[str],
     acrocentrics: set[str] = DEFAULT_HUMAN_ACROCENTRICS,
     min_scaffold_length: int = DEFAULT_MIN_SCAFFOLD_LENGTH,
+    grammar: LabelGrammar = DEFAULT_GRAMMAR,
 ) -> list[MapRow]:
     """Classify, orient, and order all contigs across all inputs.
 
@@ -591,7 +692,7 @@ def classify_and_orient(
     main_chrom: dict[int, str | None] = {}
     for i, c in enumerate(kept):
         main_chrom[i] = assign_main_chromosome(
-            c.chromosome_bins, chromosome_leaves, mass=c.chromosome_mass
+            c.chromosome_bins, chromosome_leaves, mass=c.chromosome_mass, grammar=grammar
         )
 
     # Group by (chromosome, hap). Skip contigs without a chromosome.
@@ -610,7 +711,9 @@ def classify_and_orient(
     rows: list[MapRow] = []
     for chrom, hap in sorted(cells.keys(), key=lambda k: (chromosome_sort_key(k[0]), k[1])):
         cell_indices = cells[(chrom, hap)]
-        oriented = [_orient(kept[i], chrom, chromosome_leaves, acrocentrics) for i in cell_indices]
+        oriented = [
+            _orient(kept[i], chrom, chromosome_leaves, acrocentrics, grammar) for i in cell_indices
+        ]
         # Build sort keys per oriented contig: (category, -length, original_name).
         decorated: list[tuple[tuple[int, int, str], _OrientedContig]] = []
         for o in oriented:
@@ -637,6 +740,7 @@ def classify_and_orient(
                 o.region_end,
                 o.oriented_telo.start,
                 o.oriented_telo.stop,
+                grammar=grammar,
             )
             rows.append(
                 MapRow(
