@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`build --spec` no longer discards `--external-memory`, `--threads`,
+  `--mem-gigas` and `--forward-only`.** With a spec file the command returned
+  the YAML as-is, so those four flags were accepted and silently ignored:
+  `karyoscope build --spec build.yaml --external-memory /scratch` ran the
+  in-memory k-mer sort and was OOM-killed at 48 GB on a human genome (50 GB in
+  55 s). A flag given on the command line now overrides the spec's `build:`
+  block; a flag omitted from the command line keeps the spec's value, so
+  `build: {threads: 16}` is not clobbered by `--threads`'s default of 4.
+  Database-definition flags (including `--s`, `--db-version`, `--hierarchy`,
+  `--priority`, `--colors`, `--flatten` and `--variable-k`) are now rejected
+  alongside `--spec` instead of being silently ignored, even when an explicit
+  value equals the command-line default.
+- **An OOM-killed `hks build-base` gets construction advice, not lookup
+  advice.** The hint appended to the error said "hks holds the index in
+  memory, ~10 GB, request 16 GB" -- true of `annotate`, wrong by an order of
+  magnitude for a build, which sorts every k-mer of the input in RAM (~70-80 GB
+  for a human genome at k <= 31). The build hint now points at
+  `--external-memory` / `build: external_memory:` (~14-20 GB) and at the
+  measured table in `docs/commands/build.md`.
+
 - **Haplotype labels no longer collapse onto the same character.** The karyotype
   column designator was `h<N>` only for a literal `hap<digits>` label and the
   first character otherwise, so `-i HG00097_hap1=` / `-i HG00097_hap2=` drew

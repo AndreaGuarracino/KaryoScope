@@ -13,6 +13,7 @@ See ``docs`` / README for the BED contract and the spec schema.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from pathlib import Path
 
@@ -151,22 +152,34 @@ def _named_str_map(values: tuple[str, ...], flag: str) -> dict[str, str]:
     help="Maximum query length / k-mer size.",
 )
 @click.option(
-    "-t", "--threads", type=int, default=4, show_default=True, help="Threads for HKS construction."
+    "-t",
+    "--threads",
+    type=int,
+    default=4,
+    show_default=True,
+    help="Threads for HKS construction. With --spec, overrides the spec's build.threads.",
 )
 @click.option(
     "--mem-gigas",
     type=int,
     default=8,
     show_default=True,
-    help="RAM budget (GB) for base-index construction.",
+    help="RAM budget (GB) for base-index construction. With --spec, overrides the spec's "
+    "build.mem_gigas.",
 )
 @click.option(
     "--external-memory",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
-    help="Run base-index construction in external-memory mode using this scratch directory.",
+    help="Run base-index construction in external-memory mode using this scratch directory. "
+    "With --spec, overrides the spec's build.external_memory.",
 )
-@click.option("--forward-only", is_flag=True, help="Do not add reverse-complemented k-mers.")
+@click.option(
+    "--forward-only",
+    is_flag=True,
+    help="Do not add reverse-complemented k-mers. With --spec, overrides the spec's "
+    "build.forward_only.",
+)
 @click.option(
     "--exclude",
     "exclude_raw",
@@ -263,6 +276,59 @@ def cmd(
     _report(result)
 
 
+#: Selected build options that may override ``--spec``. Resource options adapt
+#: a build to the machine; ``forward_only`` also changes the indexed content.
+_TUNING_OPTIONS: tuple[str, ...] = ("threads", "mem_gigas", "external_memory", "forward_only")
+
+
+def _apply_tuning_overrides(
+    spec: BuildSpec,
+    *,
+    threads: int,
+    mem_gigas: int,
+    external_memory: Path | None,
+    forward_only: bool,
+) -> BuildSpec:
+    """Let tuning flags given on the command line override the spec's ``build:`` block.
+
+    Before this, ``--spec`` returned the YAML spec as-is and the four tuning
+    flags were accepted and silently discarded -- ``--spec build.yaml
+    --external-memory /scratch`` ran the in-memory k-mer sort and was
+    OOM-killed at 48 GB on a human genome. Only flags the user actually
+    passed override: a flag left at its click default keeps whatever the spec
+    says (or the spec's own default), so ``build: {threads: 16}`` is not
+    clobbered by ``--threads``'s default of 4.
+
+    Whether a flag was passed is read from click's parameter source. When
+    there is no click context (called from Python), ``external_memory`` and
+    ``forward_only`` override when set, and the two integers are taken from
+    the spec, since their defaults cannot be told apart from an explicit value.
+    """
+    ctx = click.get_current_context(silent=True)
+    values = {
+        "threads": threads,
+        "mem_gigas": mem_gigas,
+        "external_memory": external_memory,
+        "forward_only": forward_only,
+    }
+    overrides: dict[str, object] = {}
+    for name in _TUNING_OPTIONS:
+        if ctx is not None:
+            source = ctx.get_parameter_source(name)
+            explicit = source is not None and source != click.core.ParameterSource.DEFAULT
+        else:
+            explicit = name in ("external_memory", "forward_only") and bool(values[name])
+        if explicit:
+            overrides[name] = values[name]
+    if not overrides:
+        return spec
+    logger.info(
+        "build: command-line %s override the spec's build block",
+        ", ".join(f"--{n.replace('_', '-')}" for n in overrides),
+    )
+    return dataclasses.replace(spec, **overrides)
+
+
 def _build_spec(
     *,
     spec_path: Path | None,
@@ -285,20 +351,41 @@ def _build_spec(
     exclude_raw: tuple[str, ...],
 ) -> BuildSpec:
     if spec_path is not None:
-        conflicting = (
-            feature_sets_raw
-            or db_id
-            or sequence
-            or backgrounds_raw
-            or exclude_raw
-            or flatten_orders_raw
-        )
+        definition_options = {
+            "db_id": ("--id", db_id),
+            "sequence": ("--sequence", sequence),
+            "feature_sets_raw": ("--feature-set", feature_sets_raw),
+            "backgrounds_raw": ("--background", backgrounds_raw),
+            "exclude_raw": ("--exclude", exclude_raw),
+            "flatten_orders_raw": ("--flatten-order", flatten_orders_raw),
+            "hierarchies_raw": ("--hierarchy", hierarchies_raw),
+            "priorities_raw": ("--priority", priorities_raw),
+            "colors_raw": ("--colors", colors_raw),
+            "flatten": ("--flatten", flatten),
+            "variable_k": ("--variable-k", variable_k),
+            "s": ("--s", s != 31),
+            "db_version": ("--db-version", db_version != "1.0.0"),
+        }
+        ctx = click.get_current_context(silent=True)
+        conflicting = []
+        for name, (flag, supplied) in definition_options.items():
+            source = ctx.get_parameter_source(name) if ctx is not None else None
+            # Parameter sources distinguish an explicit default (e.g. --s 31)
+            # from an omitted flag. Values also support direct Python callers.
+            if supplied or (source is not None and source != click.core.ParameterSource.DEFAULT):
+                conflicting.append(flag)
         if conflicting:
             raise click.UsageError(
-                "--spec cannot be combined with --id/--sequence/--feature-set/--background/"
-                "--exclude; put everything in the spec file or use the flags."
+                f"--spec cannot be combined with {', '.join(conflicting)}; "
+                "put database-definition options in the spec file or use the flags."
             )
-        return BuildSpec.from_yaml(spec_path)
+        return _apply_tuning_overrides(
+            BuildSpec.from_yaml(spec_path),
+            threads=threads,
+            mem_gigas=mem_gigas,
+            external_memory=external_memory,
+            forward_only=forward_only,
+        )
 
     if not db_id:
         raise click.UsageError("--id is required (or use --spec)")

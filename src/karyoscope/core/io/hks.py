@@ -68,6 +68,26 @@ HKS_OOM_HINT = (
 )
 
 
+#: Advice for an OOM-killed ``hks build-base``. The lookup/smooth figures above
+#: are wrong by an order of magnitude here: construction sorts every k-mer of
+#: the input in RAM, so a human genome peaks at ~70-80 GB for k <= 31 and
+#: ~150 GB above k = 32 whatever ``--mem-gigas`` says (that flag is only the
+#: SBWT budget). The lever is ``--external-memory``, which brings the same
+#: build to ~14-20 GB (measured, docs/commands/build.md).
+HKS_BUILD_OOM_HINT = (
+    "hks build-base sorts every k-mer of the input in RAM in its default mode: a "
+    "human genome peaks at ~70-80 GB for k <= 31 and ~150 GB for k > 32, whatever "
+    "--mem-gigas says (that is only the SBWT construction budget, not a cap).\n"
+    "Recommended fixes:\n"
+    "  * Pass --external-memory DIR (or `build: {external_memory: DIR}` in the "
+    "spec): the same index, ~14-20 GB peak for a human genome, ~1.4x the wall "
+    "time. DIR needs room for the k-mer intermediates.\n"
+    "  * Otherwise request ~1.5x the figures above for the in-memory algorithm "
+    "(e.g. --mem=128G on SLURM for a human genome at k <= 31).\n"
+    "  * See docs/commands/build.md, 'Resource requirements'.\n"
+)
+
+
 #: Default max-gap (bases) passed to ``hks smooth``, matching karyoscope's Python default.
 _DEFAULT_SMOOTH_MAX_GAP = 1000
 
@@ -623,7 +643,7 @@ def run_hks_build_base(
         cmd.append("--forward-only")
 
     logger.debug("running: %s", " ".join(cmd))
-    run_tool(cmd, capture=capture, oom_hint=HKS_OOM_HINT)
+    run_tool(cmd, capture=capture, oom_hint=HKS_BUILD_OOM_HINT)
     return output_path
 
 
