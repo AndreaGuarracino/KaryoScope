@@ -13,6 +13,7 @@ See ``docs`` / README for the BED contract and the spec schema.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from pathlib import Path
 
@@ -151,22 +152,34 @@ def _named_str_map(values: tuple[str, ...], flag: str) -> dict[str, str]:
     help="Maximum query length / k-mer size.",
 )
 @click.option(
-    "-t", "--threads", type=int, default=4, show_default=True, help="Threads for HKS construction."
+    "-t",
+    "--threads",
+    type=int,
+    default=4,
+    show_default=True,
+    help="Threads for HKS construction. With --spec, overrides the spec's build.threads.",
 )
 @click.option(
     "--mem-gigas",
     type=int,
     default=8,
     show_default=True,
-    help="RAM budget (GB) for base-index construction.",
+    help="RAM budget (GB) for base-index construction. With --spec, overrides the spec's "
+    "build.mem_gigas.",
 )
 @click.option(
     "--external-memory",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
-    help="Run base-index construction in external-memory mode using this scratch directory.",
+    help="Run base-index construction in external-memory mode using this scratch directory. "
+    "With --spec, overrides the spec's build.external_memory.",
 )
-@click.option("--forward-only", is_flag=True, help="Do not add reverse-complemented k-mers.")
+@click.option(
+    "--forward-only",
+    is_flag=True,
+    help="Do not add reverse-complemented k-mers. With --spec, overrides the spec's "
+    "build.forward_only.",
+)
 @click.option(
     "--exclude",
     "exclude_raw",
@@ -263,6 +276,60 @@ def cmd(
     _report(result)
 
 
+#: Construction-tuning options that are legal alongside ``--spec``. They describe
+#: the machine the build runs on, not the database, so the same spec file is
+#: built on a workstation with ``--external-memory`` and on a cluster without it.
+_TUNING_OPTIONS: tuple[str, ...] = ("threads", "mem_gigas", "external_memory", "forward_only")
+
+
+def _apply_tuning_overrides(
+    spec: BuildSpec,
+    *,
+    threads: int,
+    mem_gigas: int,
+    external_memory: Path | None,
+    forward_only: bool,
+) -> BuildSpec:
+    """Let tuning flags given on the command line override the spec's ``build:`` block.
+
+    Before this, ``--spec`` returned the YAML spec as-is and the four tuning
+    flags were accepted and silently discarded -- ``--spec build.yaml
+    --external-memory /scratch`` ran the in-memory k-mer sort and was
+    OOM-killed at 48 GB on a human genome. Only flags the user actually
+    passed override: a flag left at its click default keeps whatever the spec
+    says (or the spec's own default), so ``build: {threads: 16}`` is not
+    clobbered by ``--threads``'s default of 4.
+
+    Whether a flag was passed is read from click's parameter source. When
+    there is no click context (called from Python), ``external_memory`` and
+    ``forward_only`` override when set, and the two integers are taken from
+    the spec, since their defaults cannot be told apart from an explicit value.
+    """
+    ctx = click.get_current_context(silent=True)
+    values = {
+        "threads": threads,
+        "mem_gigas": mem_gigas,
+        "external_memory": external_memory,
+        "forward_only": forward_only,
+    }
+    overrides: dict[str, object] = {}
+    for name in _TUNING_OPTIONS:
+        if ctx is not None:
+            source = ctx.get_parameter_source(name)
+            explicit = source is not None and source != click.core.ParameterSource.DEFAULT
+        else:
+            explicit = name in ("external_memory", "forward_only") and bool(values[name])
+        if explicit:
+            overrides[name] = values[name]
+    if not overrides:
+        return spec
+    logger.info(
+        "build: command-line %s override the spec's build block",
+        ", ".join(f"--{n.replace('_', '-')}" for n in overrides),
+    )
+    return dataclasses.replace(spec, **overrides)
+
+
 def _build_spec(
     *,
     spec_path: Path | None,
@@ -298,7 +365,13 @@ def _build_spec(
                 "--spec cannot be combined with --id/--sequence/--feature-set/--background/"
                 "--exclude; put everything in the spec file or use the flags."
             )
-        return BuildSpec.from_yaml(spec_path)
+        return _apply_tuning_overrides(
+            BuildSpec.from_yaml(spec_path),
+            threads=threads,
+            mem_gigas=mem_gigas,
+            external_memory=external_memory,
+            forward_only=forward_only,
+        )
 
     if not db_id:
         raise click.UsageError("--id is required (or use --spec)")

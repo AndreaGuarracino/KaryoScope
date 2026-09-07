@@ -200,6 +200,24 @@ def test_build_base_input_and_external_memory(
     assert cmd[cmd.index("--mem-gigas") + 1] == "16"
 
 
+def test_build_base_carries_the_construction_oom_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An OOM-killed build-base must not get the lookup advice ('request 16 GB')."""
+    from karyoscope.core.io.hks import HKS_BUILD_OOM_HINT, HKS_OOM_HINT, run_hks_build_base
+
+    captured: dict = {}
+    monkeypatch.setattr("karyoscope.core.io.hks.get_hks_binary", lambda: "hks")
+    monkeypatch.setattr(
+        "karyoscope.core.io.hks.run_tool",
+        lambda cmd, capture=False, **kw: captured.update(kw),
+    )
+    run_hks_build_base(output_path=tmp_path / "b.hksb", s=31, input_path=tmp_path / "g.fa")
+    assert captured["oom_hint"] is HKS_BUILD_OOM_HINT
+    assert captured["oom_hint"] is not HKS_OOM_HINT
+    assert "--external-memory" in HKS_BUILD_OOM_HINT
+
+
 def test_build_base_requires_exactly_one_input(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -265,10 +265,10 @@ else.
 | `--spec FILE` | Build-spec YAML (alternative to `--id`/`--sequence`/`--feature-set`). |
 | `--db-version TEXT` | Database version, semver (default `1.0.0`). |
 | `-s`, `--s INTEGER` | Maximum query length / k-mer size (default `31`). |
-| `-t`, `--threads INTEGER` | Threads for HKS construction (default `4`). |
-| `--mem-gigas INTEGER` | RAM budget (GB) for base-index construction (default `8`). |
-| `--external-memory DIRECTORY` | Build the base index in external-memory mode using this scratch dir (lower RAM, slower). |
-| `--forward-only` | Do not add reverse-complemented k-mers. |
+| `-t`, `--threads INTEGER` | Threads for HKS construction (default `4`). With `--spec`, overrides the spec's `build.threads`. |
+| `--mem-gigas INTEGER` | RAM budget (GB) for base-index construction (default `8`). With `--spec`, overrides the spec's `build.mem_gigas`. |
+| `--external-memory DIRECTORY` | Build the base index in external-memory mode using this scratch dir (lower RAM, slower). With `--spec`, overrides the spec's `build.external_memory`. |
+| `--forward-only` | Do not add reverse-complemented k-mers. With `--spec`, overrides the spec's `build.forward_only`. |
 | `--exclude TEXT` | Sequence name to exclude from the whole build (e.g. an organelle `ChrM`). Repeatable / comma-separated. See [Excluding sequences](#excluding-sequences). |
 | `--db-root DIRECTORY` | Override the database root (default: `$KARYOSCOPE_DB` or `~/.karyoscope/db/`). |
 | `--no-register` | Build only; do not record in `installed.json`. |
@@ -285,7 +285,7 @@ id: HKS_mygenome
 version: "1.0.0"
 sequence: /path/genome.fa.gz
 kmer: { s: 31 }
-build: { threads: 16, mem_gigas: 8, external_memory: /scratch/tmp }  # last two optional
+build: { threads: 16, mem_gigas: 8, external_memory: /scratch/tmp }  # last two optional; -t/--mem-gigas/--external-memory/--forward-only on the command line override these
 feature_sets:
   - name: repeat
     bed: /path/repeat.bed            # 4th col = feature label (a hierarchy leaf)

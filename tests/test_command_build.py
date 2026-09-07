@@ -142,3 +142,79 @@ def test_spec_form_reads_yaml(cli_runner: CliRunner, inputs, stub_build, tmp_pat
     assert result.exit_code == 0, result.output
     assert stub_build["spec"].id == "HKS_spec"
     assert stub_build["spec"].version == "3.1.0"
+
+
+def test_spec_form_keeps_spec_build_block_when_flags_absent(
+    cli_runner: CliRunner, inputs, stub_build, tmp_path: Path
+) -> None:
+    """Click defaults (threads 4, mem_gigas 8) must not clobber the spec's build block."""
+    genome, bed = inputs
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(
+        f'id: HKS_spec\nversion: "1.0.0"\nsequence: {genome}\n'
+        f"build:\n  threads: 16\n  mem_gigas: 32\n  external_memory: {tmp_path / 'ext'}\n"
+        f"feature_sets:\n  - name: repeat\n    bed: {bed}\n"
+    )
+    result = cli_runner.invoke(
+        main,
+        ["build", "--spec", str(spec_file), "--db-root", str(tmp_path / "db")],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    spec = stub_build["spec"]
+    assert spec.threads == 16
+    assert spec.mem_gigas == 32
+    assert spec.external_memory == tmp_path / "ext"
+    assert spec.forward_only is False
+
+
+def test_spec_form_tuning_flags_override_spec(
+    cli_runner: CliRunner, inputs, stub_build, tmp_path: Path
+) -> None:
+    """--external-memory & co. given alongside --spec must reach the build, not be dropped.
+
+    Regression: ``--spec build.yaml --external-memory DIR`` used to run the
+    in-memory k-mer sort and get OOM-killed, because the flag never left the
+    command layer.
+    """
+    genome, bed = inputs
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(
+        f'id: HKS_spec\nversion: "1.0.0"\nsequence: {genome}\n'
+        f"build:\n  threads: 16\n  mem_gigas: 32\n"
+        f"feature_sets:\n  - name: repeat\n    bed: {bed}\n"
+    )
+    result = cli_runner.invoke(
+        main,
+        [
+            "build",
+            "--spec",
+            str(spec_file),
+            "--db-root",
+            str(tmp_path / "db"),
+            "--threads",
+            "3",
+            "--external-memory",
+            str(tmp_path / "scratch"),
+            "--forward-only",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    spec = stub_build["spec"]
+    assert spec.threads == 3
+    assert spec.external_memory == tmp_path / "scratch"
+    assert spec.forward_only is True
+    # not passed on the command line -> the spec's value survives
+    assert spec.mem_gigas == 32
+
+
+def test_apply_tuning_overrides_without_click_context(tmp_path: Path) -> None:
+    """Called from Python (no click context): the two nullable options override when set."""
+    spec = BuildSpec(id="x", version="1.0.0", feature_sets=[], threads=16, mem_gigas=32)
+    out = build_cmd._apply_tuning_overrides(
+        spec, threads=4, mem_gigas=8, external_memory=tmp_path, forward_only=True
+    )
+    assert out.external_memory == tmp_path
+    assert out.forward_only is True
+    assert (out.threads, out.mem_gigas) == (16, 32)
