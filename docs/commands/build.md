@@ -337,8 +337,11 @@ The **`chromosome` feature set declares the karyotype chromosomes** — its leav
 The simplest way is `--exclude` (or `exclude:` in the spec). Excluded sequences are dropped from **every** feature BED and from the gap-fill index, so no feature set covers them and they read as `none` everywhere — uniform across sets, and absent from the karyotype. They're still real sequence; they're just not karyotype chromosomes. (This is why, for example, human CHM13 databases leave out `chrM`.) Note that `--exclude` filters BEDs and the gap-fill index, not `hierarchy`/`colors`/`priority` files — so also drop the excluded names from those if you list them there.
 
 ```bash
-karyoscope build --spec build.yaml --exclude ChrM,ChrC
+karyoscope build --id HKS_mygenome --sequence genome.fa.gz \
+    --feature-set repeat=repeat.bed --exclude ChrM,ChrC
 ```
+
+With `--spec`, put it in the file instead: `exclude: [ChrM, ChrC]`.
 
 ## Examples
 
