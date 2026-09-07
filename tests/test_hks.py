@@ -529,3 +529,27 @@ def test_materialised_queries_tees_the_name_sidecar(
     assert "tee" in joined
     assert str(sidecar) in joined
     assert "samtools fasta" in joined
+
+
+@pytest.mark.parametrize("returncode,expect_hint", [(-9, True), (137, True), (1, False)])
+def test_build_base_formats_construction_hint_only_for_oom(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    expect_hint: bool,
+) -> None:
+    import subprocess
+
+    from karyoscope.core.external import ExternalToolError
+    from karyoscope.core.io.hks import HKS_BUILD_OOM_HINT, HKS_OOM_HINT, run_hks_build_base
+
+    monkeypatch.setattr("karyoscope.core.io.hks.get_hks_binary", lambda: "hks")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, returncode, "", "test failure"),
+    )
+    with pytest.raises(ExternalToolError) as exc:
+        run_hks_build_base(output_path=tmp_path / "b.hksb", s=31, input_path=tmp_path / "g.fa")
+    assert (HKS_BUILD_OOM_HINT in str(exc.value)) is expect_hint
+    assert HKS_OOM_HINT not in str(exc.value)

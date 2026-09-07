@@ -15,9 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `karyoscope build --spec build.yaml --external-memory /scratch` ran the
   in-memory k-mer sort and was OOM-killed at 48 GB on a human genome (50 GB in
   55 s). A flag given on the command line now overrides the spec's `build:`
-  block; a flag left at its default keeps the spec's value, so
-  `build: {threads: 16}` is not clobbered by `--threads`'s default of 4. The
-  spec-vs-flags exclusion for `--id`/`--sequence`/`--feature-set` is unchanged.
+  block; a flag omitted from the command line keeps the spec's value, so
+  `build: {threads: 16}` is not clobbered by `--threads`'s default of 4.
+  Database-definition flags (including `--s`, `--db-version`, `--hierarchy`,
+  `--priority`, `--colors`, `--flatten` and `--variable-k`) are now rejected
+  alongside `--spec` instead of being silently ignored, even when an explicit
+  value equals the command-line default.
 - **An OOM-killed `hks build-base` gets construction advice, not lookup
   advice.** The hint appended to the error said "hks holds the index in
   memory, ~10 GB, request 16 GB" -- true of `annotate`, wrong by an order of

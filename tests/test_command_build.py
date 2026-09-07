@@ -153,6 +153,7 @@ def test_spec_form_keeps_spec_build_block_when_flags_absent(
     spec_file.write_text(
         f'id: HKS_spec\nversion: "1.0.0"\nsequence: {genome}\n'
         f"build:\n  threads: 16\n  mem_gigas: 32\n  external_memory: {tmp_path / 'ext'}\n"
+        "  forward_only: true\n"
         f"feature_sets:\n  - name: repeat\n    bed: {bed}\n"
     )
     result = cli_runner.invoke(
@@ -165,7 +166,7 @@ def test_spec_form_keeps_spec_build_block_when_flags_absent(
     assert spec.threads == 16
     assert spec.mem_gigas == 32
     assert spec.external_memory == tmp_path / "ext"
-    assert spec.forward_only is False
+    assert spec.forward_only is True
 
 
 def test_spec_form_tuning_flags_override_spec(
@@ -218,3 +219,83 @@ def test_apply_tuning_overrides_without_click_context(tmp_path: Path) -> None:
     assert out.external_memory == tmp_path
     assert out.forward_only is True
     assert (out.threads, out.mem_gigas) == (16, 32)
+
+
+@pytest.mark.parametrize(
+    "flags,expected_threads,expected_memory",
+    [
+        (["--threads", "4"], 4, 32),
+        (["--mem-gigas", "8"], 16, 8),
+        (["--mem-gigas", "12"], 16, 12),
+        (["-t", "4", "--mem-gigas", "8"], 4, 8),
+    ],
+)
+def test_spec_explicit_tuning_defaults_override_yaml(
+    cli_runner: CliRunner,
+    inputs,
+    stub_build,
+    tmp_path: Path,
+    flags: list[str],
+    expected_threads: int,
+    expected_memory: int,
+) -> None:
+    genome, bed = inputs
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(
+        f'id: HKS_spec\nversion: "1.0.0"\nsequence: {genome}\n'
+        "build: {threads: 16, mem_gigas: 32, forward_only: true}\n"
+        f"feature_sets:\n  - name: repeat\n    bed: {bed}\n"
+    )
+    result = cli_runner.invoke(
+        main,
+        ["build", "--spec", str(spec_file), "--db-root", str(tmp_path / "db"), *flags],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    spec = stub_build["spec"]
+    assert (spec.threads, spec.mem_gigas) == (expected_threads, expected_memory)
+    assert spec.forward_only is True
+
+
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("--id", "another"),
+        ("--sequence", "{genome}"),
+        ("--feature-set", "repeat={bed}"),
+        ("--background", "repeat=other"),
+        ("--exclude", "chr1"),
+        ("--flatten-order", "repeat={bed}"),
+        ("--hierarchy", "repeat={bed}"),
+        ("--priority", "repeat={bed}"),
+        ("--colors", "repeat={bed}"),
+        ("--flatten", None),
+        ("--variable-k", None),
+        ("--s", "51"),
+        ("--s", "31"),
+        ("--db-version", "9.0.0"),
+        ("--db-version", "1.0.0"),
+    ],
+)
+def test_spec_rejects_explicit_database_definition_options(
+    cli_runner: CliRunner,
+    inputs,
+    stub_build,
+    tmp_path: Path,
+    flag: str,
+    value: str | None,
+) -> None:
+    genome, bed = inputs
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(
+        f'id: HKS_spec\nversion: "1.0.0"\nsequence: {genome}\n'
+        f"feature_sets:\n  - name: repeat\n    bed: {bed}\n"
+    )
+    flags = [flag] if value is None else [flag, value.format(genome=genome, bed=bed)]
+    result = cli_runner.invoke(
+        main,
+        ["build", "--spec", str(spec_file), "--db-root", str(tmp_path / "db"), *flags],
+    )
+    assert result.exit_code == 2, result.output
+    assert f"--spec cannot be combined with {flag}" in result.output
+    assert "spec" not in stub_build  # Reject before doing any expensive build work.

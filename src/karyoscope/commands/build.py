@@ -276,9 +276,8 @@ def cmd(
     _report(result)
 
 
-#: Construction-tuning options that are legal alongside ``--spec``. They describe
-#: the machine the build runs on, not the database, so the same spec file is
-#: built on a workstation with ``--external-memory`` and on a cluster without it.
+#: Selected build options that may override ``--spec``. Resource options adapt
+#: a build to the machine; ``forward_only`` also changes the indexed content.
 _TUNING_OPTIONS: tuple[str, ...] = ("threads", "mem_gigas", "external_memory", "forward_only")
 
 
@@ -352,18 +351,33 @@ def _build_spec(
     exclude_raw: tuple[str, ...],
 ) -> BuildSpec:
     if spec_path is not None:
-        conflicting = (
-            feature_sets_raw
-            or db_id
-            or sequence
-            or backgrounds_raw
-            or exclude_raw
-            or flatten_orders_raw
-        )
+        definition_options = {
+            "db_id": ("--id", db_id),
+            "sequence": ("--sequence", sequence),
+            "feature_sets_raw": ("--feature-set", feature_sets_raw),
+            "backgrounds_raw": ("--background", backgrounds_raw),
+            "exclude_raw": ("--exclude", exclude_raw),
+            "flatten_orders_raw": ("--flatten-order", flatten_orders_raw),
+            "hierarchies_raw": ("--hierarchy", hierarchies_raw),
+            "priorities_raw": ("--priority", priorities_raw),
+            "colors_raw": ("--colors", colors_raw),
+            "flatten": ("--flatten", flatten),
+            "variable_k": ("--variable-k", variable_k),
+            "s": ("--s", s != 31),
+            "db_version": ("--db-version", db_version != "1.0.0"),
+        }
+        ctx = click.get_current_context(silent=True)
+        conflicting = []
+        for name, (flag, supplied) in definition_options.items():
+            source = ctx.get_parameter_source(name) if ctx is not None else None
+            # Parameter sources distinguish an explicit default (e.g. --s 31)
+            # from an omitted flag. Values also support direct Python callers.
+            if supplied or (source is not None and source != click.core.ParameterSource.DEFAULT):
+                conflicting.append(flag)
         if conflicting:
             raise click.UsageError(
-                "--spec cannot be combined with --id/--sequence/--feature-set/--background/"
-                "--exclude; put everything in the spec file or use the flags."
+                f"--spec cannot be combined with {', '.join(conflicting)}; "
+                "put database-definition options in the spec file or use the flags."
             )
         return _apply_tuning_overrides(
             BuildSpec.from_yaml(spec_path),

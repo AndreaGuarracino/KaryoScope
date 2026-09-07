@@ -262,7 +262,7 @@ else.
 | `--flatten` | Pre-flatten overlapping BED regions to one label per base ([Priorities](#priorities)). |
 | `--flatten-order NAME=PATH` | Flatten order file for a feature set; implies `--flatten` for that set ([Priorities](#priorities)). Repeatable. |
 | `--variable-k` | Build a variable-k index, queryable at any k ≤ s ([Fixed-k and variable-k](#fixed-k-and-variable-k)). Not combinable with `--priority`. |
-| `--spec FILE` | Build-spec YAML (alternative to `--id`/`--sequence`/`--feature-set`). |
+| `--spec FILE` | Build-spec YAML; database-definition flags must be placed in this file instead. |
 | `--db-version TEXT` | Database version, semver (default `1.0.0`). |
 | `-s`, `--s INTEGER` | Maximum query length / k-mer size (default `31`). |
 | `-t`, `--threads INTEGER` | Threads for HKS construction (default `4`). With `--spec`, overrides the spec's `build.threads`. |
@@ -277,6 +277,17 @@ else.
 | `-h`, `--help` | Show this message and exit. |
 
 ## Build-spec file
+
+When using `--spec`, set database-definition options in the YAML: `--id`,
+`--sequence`, `--feature-set`, `--background`, `--exclude`, `--flatten-order`,
+`--hierarchy`, `--priority`, `--colors`, `--flatten`, `--variable-k`, `--s`, and
+`--db-version` cannot be supplied alongside it. Explicitly supplying a default
+value (such as `--s 31`) is also rejected. The four permitted build overrides
+are `--threads`, `--mem-gigas`, `--external-memory`, and `--forward-only`;
+omitting them preserves the YAML values, while explicitly supplying them
+replaces those values even if the supplied value equals the CLI default.
+Output and execution flags such as `--db-root`, `--force`, `--no-register`, and
+`--keep-intermediates` remain available with either input form.
 
 For databases with several feature sets, a YAML spec is clearer than flags and is checked in alongside the data:
 
