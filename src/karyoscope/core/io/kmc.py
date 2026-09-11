@@ -513,23 +513,26 @@ def _run_get_featureids_piped_from_alignment(
     ]
     logger.debug("piping: %s | %s", " ".join(samtools_cmd), " ".join(getfid_cmd))
 
-    # samtools stderr goes to a temp file, not a pipe: nothing drains a
-    # pipe until get_featureIDs finishes, so a warning-heavy BAM (one
-    # line per malformed record) could fill the ~64 KB pipe buffer,
-    # block samtools mid-write, stall its stdout, and deadlock the
-    # whole pipeline. A file has no such limit.
+    # Every child and the FIFO live inside ONE try/finally. If launching a
+    # stage raises (PermissionError on the binary, KeyboardInterrupt, a
+    # failed mkfifo) the stages already running are killed and reaped, the
+    # FIFO directory is removed and a partial sidecar is deleted -- none of
+    # that may depend on the happy path having been reached.
+    samtools_proc: subprocess.Popen | None = None
     tee_proc: subprocess.Popen | None = None
     names_proc: subprocess.Popen | None = None
     fifo_dir: Path | None = None
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errf:
-        samtools_proc = subprocess.Popen(
-            samtools_cmd,
-            stdout=subprocess.PIPE,
-            stderr=errf,
-            text=True,
-        )
-        getfid_stdin = samtools_proc.stdout
-        try:
+    started: list[subprocess.Popen] = []
+    tee_returncode, tee_stderr = 0, ""
+    names_returncode, names_stderr = 0, ""
+    ok = False
+    try:
+        # samtools stderr goes to a temp file, not a pipe: nothing drains a
+        # pipe until get_featureIDs finishes, so a warning-heavy BAM (one
+        # line per malformed record) could fill the ~64 KB pipe buffer,
+        # block samtools mid-write, stall its stdout, and deadlock the
+        # whole pipeline. A file has no such limit.
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errf:
             if query_names_sidecar is not None:
                 # The consumer opens the FIFO for reading and blocks until tee
                 # opens it for writing; tee blocks the other way round. Start
@@ -547,46 +550,68 @@ def _run_get_featureids_piped_from_alignment(
                     stdin=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                 )
+                started.append(names_proc)
+            samtools_proc = subprocess.Popen(
+                samtools_cmd,
+                stdout=subprocess.PIPE,
+                stderr=errf,
+                text=True,
+            )
+            started.append(samtools_proc)
+            getfid_stdin = samtools_proc.stdout
+            if query_names_sidecar is not None:
                 tee_proc = subprocess.Popen(
                     [require_tool("tee"), str(fifo)],
                     stdin=samtools_proc.stdout,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )
+                started.append(tee_proc)
                 getfid_stdin = tee_proc.stdout
-            getfid_proc = subprocess.run(
-                getfid_cmd,
-                stdin=getfid_stdin,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        finally:
-            # Closing the read ends before wait() lets the upstream stages
-            # see SIGPIPE cleanly if get_featureIDs exited early.
-            if tee_proc is not None and tee_proc.stdout is not None:
-                tee_proc.stdout.close()
-            if samtools_proc.stdout is not None:
-                samtools_proc.stdout.close()
-        samtools_returncode = samtools_proc.wait()
-        errf.seek(0)
-        samtools_stderr = errf.read()
+            try:
+                getfid_proc = subprocess.run(
+                    getfid_cmd,
+                    stdin=getfid_stdin,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            finally:
+                # Closing the read ends before wait() lets the upstream stages
+                # see SIGPIPE cleanly if get_featureIDs exited early.
+                if tee_proc is not None and tee_proc.stdout is not None:
+                    tee_proc.stdout.close()
+                if samtools_proc.stdout is not None:
+                    samtools_proc.stdout.close()
+            samtools_returncode = samtools_proc.wait()
+            errf.seek(0)
+            samtools_stderr = errf.read()
 
-    tee_returncode, tee_stderr = 0, ""
-    names_returncode, names_stderr = 0, ""
-    if tee_proc is not None:
-        _, err = tee_proc.communicate()
-        tee_returncode, tee_stderr = tee_proc.returncode, err.decode(errors="replace")
-    if names_proc is not None:
-        _, err = names_proc.communicate()
-        names_returncode, names_stderr = names_proc.returncode, err.decode(errors="replace")
-    if fifo_dir is not None:
-        shutil.rmtree(fifo_dir, ignore_errors=True)
-    if query_names_sidecar is not None and (
-        getfid_proc.returncode or samtools_returncode or tee_returncode or names_returncode
-    ):
-        # Whatever failed, the sidecar is not trustworthy.
-        query_names_sidecar.unlink(missing_ok=True)
+        if tee_proc is not None:
+            _, err = tee_proc.communicate()
+            tee_returncode, tee_stderr = tee_proc.returncode, err.decode(errors="replace")
+        if names_proc is not None:
+            _, err = names_proc.communicate()
+            names_returncode, names_stderr = names_proc.returncode, err.decode(errors="replace")
+        ok = not (
+            getfid_proc.returncode or samtools_returncode or tee_returncode or names_returncode
+        )
+    finally:
+        for proc in started:
+            if proc.poll() is None:
+                proc.kill()
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:  # pragma: no cover - a stuck child
+                logger.warning("child %s did not exit after SIGKILL", proc.args)
+            for handle in (proc.stdin, proc.stdout, proc.stderr):
+                if handle is not None and not handle.closed:
+                    handle.close()
+        if fifo_dir is not None:
+            shutil.rmtree(fifo_dir, ignore_errors=True)
+        if query_names_sidecar is not None and not ok:
+            # Whatever failed or was interrupted, the sidecar is not trustworthy.
+            query_names_sidecar.unlink(missing_ok=True)
 
     # Order matters: downstream failure (get_featureIDs) is the more
     # actionable error to surface first. Both paths route through
