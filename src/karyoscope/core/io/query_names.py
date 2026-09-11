@@ -18,24 +18,30 @@ There are two ways to produce it:
 * **Teed off a decode that is happening anyway.** The HKS backend materialises
   a BAM/CRAM to a temp FASTA before querying; the caller builds that pipeline
   and appends :func:`names_sink` to it, so the names come off the same pass.
+* **Teed off a decode that is happening anyway.** The HKS backend materialises
+  a BAM/CRAM to a temp FASTA before querying, and the KMC backend streams the
+  decode into ``get_featureIDs``; both tee the names off that one decode
+  (:func:`names_sink`), so an alignment is never decoded twice for this.
 * **A scan pass of its own** (:func:`write_query_names_sidecar`). FASTA and
   FASTQ are read directly by both query tools, so there is no decode to tee
-  off; and on the KMC backend an alignment is fed to ``get_featureIDs`` by a
-  streaming pipe with no seekable copy left behind. Either way the names take
-  one extra streaming read of the input -- cheap next to the lookup, which
-  reads the input once per feature set, but for an alignment on KMC it is a
-  full second decode, and the CLI help says so.
+  off, and the names take one extra streaming read of the input. Against
+  hks, which reads the input once per feature set, that is a small fraction;
+  against ``get_featureIDs``, which reads it once for all feature sets, it is
+  one more read of equal size.
 
-The FASTA/FASTQ scan is ``sed``/``grep`` over the (decompressed) file and
-nothing else: no sequence parser, because ``hks`` itself imposes the shape
-the scan relies on. Its reader (``jseqio``) takes a FASTQ record as exactly
-four lines, so record N's header is line 4N+1 and a FASTQ the scan would
-misread is one hks rejects; and it names a record by its header up to the
-first whitespace, which is what the ``cut`` tail keeps.
+The scan is ``sed`` over the (decompressed) file and nothing else: no
+sequence parser, because ``hks`` itself imposes the shape the scan relies on.
+Its reader (``jseqio``) takes a FASTQ record as exactly four lines, so record
+N's header is line 4N+1 and a FASTQ the scan would misread is one hks
+rejects; it tells FASTA from FASTQ, and gzip from plain, by content, which
+the scan mirrors (:func:`sniff_fastx`); and it names a record by dropping the
+first byte and taking the first whitespace-delimited token, which is what
+``_NORMALISE`` does.
 """
 
 from __future__ import annotations
 
+import gzip
 import logging
 import shlex
 import subprocess
@@ -51,15 +57,17 @@ logger = logging.getLogger(__name__)
 QUERY_NAMES_SUFFIX = ".query_names.txt.gz"
 
 #: Alignment formats decoded with ``samtools fasta``; everything else is
-#: FASTA or FASTQ and is scanned with ``awk`` directly.
+#: FASTA or FASTQ, told apart by CONTENT (see :func:`sniff_fastx`).
 _ALIGNMENT_EXTENSIONS: tuple[str, ...] = (".bam", ".cram")
-_FASTQ_EXTENSIONS: tuple[str, ...] = (".fastq", ".fq", ".fastq.gz", ".fq.gz")
 
-#: Header lines of a FASTA stream. ``{src}`` is `` <path>`` or empty (stdin).
-#: ``grep`` exits 1 on no match, which under pipefail would fail an input
-#: with zero records; the guard maps that one code to success and leaves a
-#: real error (2) alone.
-_FASTA_HEADERS = "(grep '^>'{src} || [ $? -eq 1 ])"
+#: Header line -> name, exactly as ``hks`` does it (``load_seq_names``):
+#: drop the record's first byte (``>``/``@``), then take the first
+#: whitespace-delimited token -- ``split_whitespace().next()`` -- which skips
+#: leading whitespace and stops at any whitespace, tab, CR, VT and FF
+#: included, so a ``@ read1`` header is ``read1`` and a CRLF header loses its
+#: ``\r``. ``[[:space:]]`` is the POSIX spelling of that set (ASCII; hks also
+#: treats non-ASCII Unicode spaces as separators, which no header has).
+_NORMALISE = "s/^.//;s/^[[:space:]]*//;s/[[:space:]].*//"
 
 #: Header lines of a FASTQ stream, by POSITION: print a line, skip three.
 #: Headers are not matched on their leading ``@`` because a quality line can
@@ -67,45 +75,78 @@ _FASTA_HEADERS = "(grep '^>'{src} || [ $? -eq 1 ])"
 #: ours -- it is how ``hks`` parses FASTQ, so this is the only shape whose
 #: ranks exist to be mapped. sed rather than awk because it is the fast way
 #: to say "every fourth line": 1.0 s against 10.6 s for 2 M reads with the
-#: BSD awk on macOS, and no regex per line anywhere.
-_FASTQ_HEADERS = "sed -n 'p;n;n;n'{src}"
+#: BSD awk on macOS. Normalisation is a SECOND sed, downstream, so it runs on
+#: the header lines only and on another core: 1.4 s for the pair against
+#: 2.1 s with the substitutions folded into the selector. ``{src}`` is
+#: `` <path>`` or empty (stdin).
+_FASTQ_SELECT = f"sed -n 'p;n;n;n'{{src}} | sed '{_NORMALISE}'"
 
-#: Header line -> name: up to the first whitespace (tab or space, the same
-#: split ``hks`` makes), minus the leading ``>``/``@``. This runs on the
-#: header lines only, a small fraction of the input, so the three stages cost
-#: nothing measurable.
-_HEADER_TO_NAME = "cut -f1 | cut -d ' ' -f1 | cut -c2-"
+#: Header lines of a FASTA stream: the ``>`` lines, then the same normaliser.
+#: A sequence line fails the anchored match at its first byte, so a
+#: multi-line assembly costs one comparison per line.
+_FASTA_SELECT = f"sed -n '/^>/p'{{src}} | sed '{_NORMALISE}'"
 
 
-def names_sink(sidecar: Path, threads: int = 1) -> str:
+def sniff_fastx(path: Path) -> tuple[bool, bool]:
+    """``(gzipped, fastq)`` for ``path``, decided from its bytes like ``hks`` does.
+
+    ``hks`` (jseqio) ignores the filename: gzip is the two magic bytes, and the
+    format is the first byte of the decompressed stream, ``>`` or ``@``. A
+    scan keyed on extensions would silently write an EMPTY sidecar for an
+    extensionless FASTQ that hks annotated fine, so this looks at the same
+    bytes. An empty file is FASTA with no records (an empty sidecar, which is
+    right); any other first byte is refused.
+    """
+    with path.open("rb") as fh:
+        magic = fh.read(2)
+    gzipped = magic == b"\x1f\x8b"
+    if gzipped:
+        with gzip.open(path, "rb") as fh:
+            first = fh.read(1)
+    else:
+        first = magic[:1]
+    if first == b"@":
+        return gzipped, True
+    if first in (b">", b""):
+        return gzipped, False
+    raise KaryoscopeError(
+        f"{path.name} is not FASTA or FASTQ (first byte {first!r}); cannot list its "
+        f"record names for --query-names-sidecar."
+    )
+
+
+def names_sink(sidecar: Path, threads: int = 1, *, stdin_from: Path | None = None) -> str:
     """The pipeline tail that turns a FASTA stream into the sidecar at ``sidecar``.
 
-    Returned as shell text (``grep ... | cut ... | bgzip > <sidecar>``) for the
-    caller to append to a producer with ``|``. Keeping the tail here means the
-    tee in :func:`karyoscope.core.io.hks.materialised_queries` and the scan
-    pass in :func:`write_query_names_sidecar` cannot drift into two formats.
+    Returned as shell text (``sed ... | bgzip > <sidecar>``) for the caller to
+    append to a producer with ``|``, or, with ``stdin_from``, to run on its own
+    reading that path (a FIFO a ``tee`` writes into). Keeping the tail here
+    means the tee in :func:`karyoscope.core.io.hks.materialised_queries`, the
+    one in :mod:`karyoscope.core.io.kmc` and the scan pass in
+    :func:`write_query_names_sidecar` cannot drift into two formats.
     """
-    headers = _FASTA_HEADERS.format(src="")
-    return f"{headers} | {_HEADER_TO_NAME} | {bgzip_stage(threads)} > {shlex.quote(str(sidecar))}"
+    src = "" if stdin_from is None else f" < {shlex.quote(str(stdin_from))}"
+    select = _FASTA_SELECT.format(src=src)
+    return f"{select} | {bgzip_stage(threads)} > {shlex.quote(str(sidecar))}"
 
 
 def _scan_pipeline(input_path: Path, sidecar: Path, threads: int = 1) -> str:
     """Shell text producing ``sidecar`` from a FASTA/FASTQ ``input_path``.
 
     The header selector reads a plain file itself; a gzipped one is
-    decompressed into it. Nothing is spent parsing sequence when only the
-    header line of each record is wanted: measured on 2 M reads, the whole
-    pipeline runs at ~650 MB/s of FASTQ on a laptop, under half the time of
-    one ``hks lookup`` over the same file against a toy index, and a far
-    smaller fraction against a human one.
+    decompressed into it. The whole input is read once -- there is no way
+    to find the headers without reading the lines between them -- but
+    nothing is spent parsing sequence when only the header line of each
+    record is wanted: measured on 2 M reads, the pipeline runs at ~650 MB/s
+    of FASTQ on a laptop.
     """
-    name = input_path.name.lower()
-    headers = _FASTQ_HEADERS if name.endswith(_FASTQ_EXTENSIONS) else _FASTA_HEADERS
+    gzipped, fastq = sniff_fastx(input_path)
+    select = _FASTQ_SELECT if fastq else _FASTA_SELECT
     quoted_in = shlex.quote(str(input_path))
-    tail = f"{_HEADER_TO_NAME} | {bgzip_stage(threads)} > {shlex.quote(str(sidecar))}"
-    if name.endswith(".gz"):
-        return f"gzip -dc {quoted_in} | {headers.format(src='')} | {tail}"
-    return f"{headers.format(src=' ' + quoted_in)} | {tail}"
+    tail = f"{bgzip_stage(threads)} > {shlex.quote(str(sidecar))}"
+    if gzipped:
+        return f"gzip -dc {quoted_in} | {select.format(src='')} | {tail}"
+    return f"{select.format(src=' ' + quoted_in)} | {tail}"
 
 
 def alignment_decode_cmd(
@@ -171,7 +212,7 @@ def write_query_names_sidecar(
         producer = alignment_decode_cmd(input_path, reference=reference, threads=threads)
         pipeline = f"{shlex.join(producer)} | {names_sink(sidecar, threads)}"
     else:
-        producer = ["sed" if input_path.name.lower().endswith(_FASTQ_EXTENSIONS) else "grep"]
+        producer = ["sed"]
         pipeline = _scan_pipeline(input_path, sidecar, threads)
     logger.debug("scanning query names: %s", pipeline)
     result = subprocess.run(

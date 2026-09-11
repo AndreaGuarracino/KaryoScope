@@ -44,6 +44,11 @@ def test_stage_adds_threads_only_above_one(monkeypatch: pytest.MonkeyPatch) -> N
     assert bgzip_stage(6) == "bgzip -@ 6"
 
 
+def test_stage_quotes_an_executable_path_with_spaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bz, "require_tool", lambda name, **kw: "/opt/my tools/bin/bgzip")
+    assert bgzip_stage(2) == "'/opt/my tools/bin/bgzip' -@ 2"
+
+
 def test_missing_bgzip_is_a_tool_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("karyoscope.core.external.shutil.which", lambda *_: None)
     with pytest.raises(ToolNotFoundError):
@@ -63,3 +68,26 @@ def test_failed_compressor_surfaces_at_close(
     with pytest.raises(ExternalToolError) as excinfo:
         h.close()
     assert "disk full" in str(excinfo.value)
+
+
+def test_early_exit_of_the_compressor_still_reports_its_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A compressor that dies before reading its input turns the final flush
+    into BrokenPipeError. The caller must still get the child's exit status
+    and stderr, not the pipe symptom."""
+    fake = tmp_path / "bgzip"
+    fake.write_text("#!/bin/sh\necho 'disk full' >&2\nexit 3\n")  # exits without reading
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setattr(bz, "require_tool", lambda name, **kw: str(fake))
+    h = open_bgzip_writer(tmp_path / "out.gz")
+    import time
+
+    time.sleep(0.2)  # let the child exit so the pipe is closed on its end
+    with pytest.raises(ExternalToolError) as excinfo:
+        try:
+            h.write("x" * 1_000_000)  # more than a pipe buffer: may raise here...
+        finally:
+            h.close()  # ...or here; either way close() reports the child
+    assert "disk full" in str(excinfo.value)
+    assert excinfo.value.returncode == 3

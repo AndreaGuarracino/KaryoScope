@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import io
 import logging
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -43,7 +44,7 @@ def _bgzip_cmd(threads: int) -> list[str]:
 
 def bgzip_stage(threads: int = 1) -> str:
     """Shell text for ``bgzip`` as a pipeline stage (stdin -> stdout)."""
-    return " ".join(_bgzip_cmd(threads))
+    return shlex.join(_bgzip_cmd(threads))
 
 
 class _BgzipWriter(io.TextIOWrapper):
@@ -73,10 +74,17 @@ class _BgzipWriter(io.TextIOWrapper):
     def close(self) -> None:
         if self.closed:
             return
+        # A compressor that died early makes the final flush fail with
+        # BrokenPipeError. That exception is the symptom; the child's exit
+        # status and stderr are the cause, so reap the child first and let
+        # its failure be the error the caller sees.
+        flush_error: BaseException | None = None
         try:
             super().close()  # flushes and closes the child's stdin
+        except (OSError, ValueError) as e:
+            flush_error = e
         finally:
-            # Not communicate(): it would try to flush the stdin we just closed.
+            # Not communicate(): it would try to flush the stdin just closed.
             assert self._proc.stderr is not None
             stderr = self._proc.stderr.read()
             self._proc.stderr.close()
@@ -87,7 +95,9 @@ class _BgzipWriter(io.TextIOWrapper):
                 cmd=self._proc.args,
                 returncode=self._proc.returncode,
                 stderr=stderr.decode(errors="replace"),
-            )
+            ) from flush_error
+        if flush_error is not None:
+            raise flush_error
 
 
 def open_bgzip_writer(path: Path, threads: int = 1) -> io.TextIOWrapper:

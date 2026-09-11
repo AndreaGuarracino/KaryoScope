@@ -114,8 +114,9 @@ logger = logging.getLogger(__name__)
     "read names, e.g. to pair paired-end mates. For BAM/CRAM on the HKS backend "
     "it is teed off the decode annotate performs anyway, so it is nearly free -- "
     "recovering the same mapping afterwards costs a second full decode (~25 min "
-    "on a 56 GB CRAM). For FASTA/FASTQ input (either backend) it is one awk pass "
-    "over the file; for BAM/CRAM on the KMC backend it is a separate decode.",
+    "on a 56 GB CRAM); the KMC backend tees it off its streaming decode the same "
+    "way. For FASTA/FASTQ input (either backend) it is one extra streaming read "
+    "of the file that selects header lines only.",
 )
 @click.option(
     "--reference",

@@ -1627,6 +1627,7 @@ def annotate(
         # reuse stays correct even if those args changed between runs.
         kmc_db_basename = db_dir / manifest.index.basename
         combined_bed = combined_bed_path(output_dir, prefix)
+        sidecar_written = False
 
         if not force and combined_bed_is_complete(combined_bed):
             logger.info(
@@ -1646,6 +1647,10 @@ def annotate(
                 threads,
             )
             t_kmc_start = time.perf_counter()
+            # An alignment's names are teed off the streaming decode inside
+            # run_get_featureids (one decode, not two); a FASTA/FASTQ, which
+            # get_featureIDs reads itself, gets a scan pass below.
+            is_alignment = input_path.suffix.lower() in (".bam", ".cram")
             combined_bed = run_get_featureids(
                 db_path=kmc_db_basename,
                 input_path=input_path,
@@ -1654,7 +1659,10 @@ def annotate(
                 prefix=prefix,
                 reference=reference,
                 capture=True,
+                query_names_sidecar=sidecar_path if is_alignment else None,
             )
+            if sidecar_path is not None and is_alignment:
+                sidecar_written = True
             if not combined_bed.is_file():
                 raise KaryoscopeError(
                     f"get_featureIDs did not produce expected output at {combined_bed}"
@@ -1671,14 +1679,14 @@ def annotate(
             progress.stage("k-mer query", time.perf_counter() - t_kmc_start)
         logger.debug("combined BED at %s", combined_bed)
 
-        if sidecar_path is not None:
-            # Nothing to tee off on this backend: get_featureIDs reads a
-            # FASTA/FASTQ itself and is fed an alignment by a streaming pipe
-            # that leaves no seekable copy behind. So the names take a pass of
-            # their own -- one extra read of a FASTA/FASTQ, a full second
-            # decode of a BAM/CRAM. After the query rather than before it, so
-            # a run that is going to die in get_featureIDs has not paid for
-            # the names first.
+        if sidecar_path is not None and not sidecar_written:
+            # get_featureIDs reads a FASTA/FASTQ itself, so there is no
+            # decode to tee the names off and they take one pass of their
+            # own. (An alignment reaches here only when the combined BED was
+            # reused from a previous run and no decode happened; the pass is
+            # then a decode of its own.) After the query rather than before
+            # it, so a run that is going to die in get_featureIDs has not
+            # paid for the names first.
             t_names_start = time.perf_counter()
             write_query_names_sidecar(
                 input_path, sidecar_path, reference=reference, threads=threads, capture=True

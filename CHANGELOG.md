@@ -30,16 +30,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   FASTQ input on HKS, or any input on the KMC backend, ran to completion with
   no sidecar and no warning. It now writes `<outdir>/<input>.query_names.txt.gz`
   for every input on both backends. Where there is a decode to tee it off
-  (BAM/CRAM on HKS) it still comes for free; a FASTA/FASTQ input, which both
-  query tools read directly, gets one streaming pass over the file that
-  reads only header lines (`grep '^>'` for FASTA, `sed -n 'p;n;n;n'` for
-  FASTQ -- every fourth line, which is how `hks` itself parses FASTQ; one
-  extra read of the input at ~650 MB/s, small next to a lookup that reads it
-  once per feature set), and a BAM/CRAM on KMC gets a second `samtools fasta` pass,
-  since `get_featureIDs` is fed by a pipe that leaves no seekable copy behind.
-  No new dependency. The name-extracting tail is now defined once and shared by
-  the tee and the scan pass, so the file has one format: the header up to its
-  first whitespace, one per line, line N+1 is rank N, plain gzip. The sidecar
+  it still comes for free: BAM/CRAM on HKS as before, and BAM/CRAM on KMC by
+  a `tee` into a FIFO on the decode already streaming into `get_featureIDs`.
+  A FASTA/FASTQ input, which both query tools read directly, gets one extra
+  streaming read of the file that selects header lines with `sed` (every
+  fourth line for FASTQ, which is how `hks` itself parses FASTQ; ~650 MB/s
+  measured; a small fraction next to `hks`, which reads the input once per
+  feature set, and one extra read of equal size next to `get_featureIDs`,
+  which reads it once). Gzip and FASTA-vs-FASTQ are detected from the bytes
+  as `hks` does, not from the filename. `bgzip` is the only tool involved
+  beyond the decode. The name-extracting tail is now defined once and shared
+  by both tees and the scan pass, so the file has one format: the header's
+  first whitespace-delimited token after its leading byte, exactly as `hks`
+  names a record (leading whitespace skipped, CR/VT/FF count as whitespace),
+  one per line, line N+1 is rank N, bgzip. The sidecar
   is reported in the `Wrote:` block and on `AnnotateResult.query_names_sidecar`,
   and the `--query-names` refusal on read-level input now points at the flag.
   The `annotate` reference page, which described the sidecar's purpose
