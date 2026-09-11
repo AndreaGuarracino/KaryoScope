@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Every `.gz` KaryoScope writes is now bgzip.** `bin -o x.bed.gz`,
+  `remap-bed -o x.bed.gz`, the scaffold BED/FASTA rewriters and the
+  query-names sidecar used Python's `gzip` module or `gzip(1)`, while
+  `annotate`, `scaffold`, `centromeres` and `karyotype` bgzipped their outputs
+  -- two containers for one file extension, documented as "gzipped" in one
+  place and "bgzipped" in another. bgzip output is a gzip stream, so nothing
+  that reads these files changes; what changes is that compression runs in
+  parallel (`bgzip -@`), the files are tabix-indexable, and the line-by-line
+  writers stream into `bgzip` as they go rather than compressing in-process,
+  so the compressed file is the only copy that ever touches the disk. `bgzip`
+  is therefore required whenever a `.gz` output is requested, including
+  `--query-names-sidecar`.
+
 ### Fixed
 
 - **`--query-names-sidecar` no longer does nothing, silently, outside its
@@ -16,10 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no sidecar and no warning. It now writes `<outdir>/<input>.query_names.txt.gz`
   for every input on both backends. Where there is a decode to tee it off
   (BAM/CRAM on HKS) it still comes for free; a FASTA/FASTQ input, which both
-  query tools read directly, gets one `awk` pass over the file (one extra
-  read of the input, small next to a lookup that reads it once per feature
-  set; FASTQ headers are taken every fourth line, which is how `hks` itself
-  parses FASTQ), and a BAM/CRAM on KMC gets a second `samtools fasta` pass,
+  query tools read directly, gets one streaming pass over the file that
+  reads only header lines (`grep '^>'` for FASTA, `sed -n 'p;n;n;n'` for
+  FASTQ -- every fourth line, which is how `hks` itself parses FASTQ; one
+  extra read of the input at ~650 MB/s, small next to a lookup that reads it
+  once per feature set), and a BAM/CRAM on KMC gets a second `samtools fasta` pass,
   since `get_featureIDs` is fed by a pipe that leaves no seekable copy behind.
   No new dependency. The name-extracting tail is now defined once and shared by
   the tee and the scan pass, so the file has one format: the header up to its

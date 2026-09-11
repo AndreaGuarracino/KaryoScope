@@ -28,7 +28,7 @@ A BED contig that is *absent* from the map is not an error: the map only lists c
 | --- | --- |
 | `-b, --bed FILE` | Annotation BED in original (unscaffolded) contig coordinates. `.gz` supported. [required] |
 | `-m, --map FILE` | A `scaffold_map.tsv` written by `karyoscope scaffold` (or `karyotype`). [required] |
-| `-o, --output FILE` | Output BED in scaffolded coordinates. Gzipped iff the path ends in `.gz`. [required] |
+| `-o, --output FILE` | Output BED in scaffolded coordinates. bgzipped iff the path ends in `.gz`. [required] |
 | `--strict` | Promote advisory checks (filename-stem mismatch; map contigs with no records in the BED) from warnings to hard errors. |
 
 ## Example

@@ -486,11 +486,10 @@ def _annotate_dependencies(
     needed = ["hks"] if index_type == "hks" else ["get_featureIDs"]
     if input_path.suffix.lower() in (".bam", ".cram"):
         needed.append("samtools")
-    # --query-names-sidecar adds nothing here: a FASTA/FASTQ is scanned with
-    # awk (core.io.query_names) and an alignment's names come off the
-    # samtools decode already required above.
-    del query_names_sidecar
-    if bgzip:
+    # --query-names-sidecar needs no reader of its own -- a FASTA/FASTQ is
+    # scanned with awk (core.io.query_names) and an alignment's names come off
+    # the samtools decode already required above -- but the sidecar is bgzipped.
+    if bgzip or query_names_sidecar:
         needed.append("bgzip")
     return needed
 

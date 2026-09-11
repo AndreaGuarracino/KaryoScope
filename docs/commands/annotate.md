@@ -19,7 +19,7 @@ karyoscope annotate -i INPUT [OPTIONS]
 | `-i`, `--input FILE` | Input sequence file. Accepts FASTA (`.fasta`/`.fa`/`.fna`, plain or `.gz`), FASTQ (`.fastq`/`.fq`, plain or `.gz`), BAM (`.bam`) or CRAM (`.cram`). BAM/CRAM inputs are converted with `samtools fasta` (requires `samtools` on PATH); CRAM also requires `--reference`. **[required]** |
 | `--reference FILE` | Reference FASTA a CRAM input was aligned against. **Required for `.cram`**, ignored otherwise. See [CRAM input](#cram-input). |
 | `--query-names` / `--no-query-names` | Identify output sequences by name rather than ordinal rank. Assemblies default to names; **refused for read-level input**, which always uses ranks. See [Paired-end reads](#paired-end-reads). |
-| `--query-names-sidecar` | Also write `<outdir>/<input>.query_names.txt.gz` for each input: every record's name, one per line, in the order the query assigns ranks (line N+1 is rank N). This is how rank-identified read-level output is joined back to read names. For BAM/CRAM on the HKS backend it is teed off the decode `annotate` performs anyway, so it is nearly free; for FASTA/FASTQ input (either backend) it is one `awk` pass over the file, and for BAM/CRAM on the KMC backend a separate decode. See [Query names](#query-names). |
+| `--query-names-sidecar` | Also write `<outdir>/<input>.query_names.txt.gz` for each input: every record's name, one per line, in the order the query assigns ranks (line N+1 is rank N). This is how rank-identified read-level output is joined back to read names. For BAM/CRAM on the HKS backend it is teed off the decode `annotate` performs anyway, so it is nearly free; for FASTA/FASTQ input (either backend) it is one streaming pass over the file that reads only header lines, and for BAM/CRAM on the KMC backend a separate decode. See [Query names](#query-names). |
 | `-o`, `--outdir DIRECTORY` | Directory to write output BEDs into. Default: same directory as `--input`. |
 | `--db TEXT` | Database id to use (e.g., `KS_human_CHM13_v2`). Default: the unique installed database if there's exactly one. |
 | `--db-root DIRECTORY` | Override the database root directory (default: `$KARYOSCOPE_DB` or `~/.karyoscope/db/`). |
@@ -112,7 +112,7 @@ Note the coordinates are k-mer offsets **within each read**, not genomic positio
 `--query-names-sidecar` writes `<outdir>/<input>.query_names.txt.gz` for each input: one
 record name per line, in the order the query assigns ranks, so line N+1 is rank N. The name
 is the record header up to its first whitespace (`SRR123.7` from `@SRR123.7 1 length=151`),
-with the `/1`,`/2` mate suffix for BAM/CRAM input. The file is plain `gzip`, not bgzip. It is
+with the `/1`,`/2` mate suffix for BAM/CRAM input. Like every `.gz` KaryoScope writes it is bgzipped, so any gzip reader opens it. It is
 named from the input alone — not the database — because the mapping does not depend on
 what the reads were annotated against, so one CRAM run against two databases yields one
 sidecar.
@@ -122,12 +122,12 @@ What it costs depends on where the names come from:
 | Input | Backend | How the names are produced |
 |---|---|---|
 | BAM / CRAM | HKS | Teed off the `samtools fasta` decode `annotate` runs anyway. Nearly free; regenerating the mapping afterwards is a second full decode (~25 min on a 56 GB CRAM). |
-| FASTA / FASTQ | either | One `awk` pass over the file (`gzip -dc` in front of it for `.gz`), picking header lines by `>` for FASTA and by position — every fourth line — for FASTQ. One extra read of the input, small next to a lookup that reads it once per feature set; decompression is the whole cost. |
+| FASTA / FASTQ | either | One streaming pass over the file (`gzip -dc` in front of it for `.gz`): `grep '^>'` for FASTA, `sed -n 'p;n;n;n'` (every fourth line) for FASTQ, then `cut` to the first whitespace and `bgzip -@ threads`. One extra read of the input at ~650 MB/s of FASTQ on a laptop, small next to a lookup that reads it once per feature set. |
 | BAM / CRAM | KMC | A separate `samtools fasta` pass — a second decode, because `get_featureIDs` is fed by a streaming pipe that leaves no seekable copy behind. |
 
 Only `hks` emits ranks; `get_featureIDs` (the KMC backend) always writes names into the BED, so there the sidecar is written for consistency rather than out of necessity.
 
-The FASTQ scan takes four lines per record without parsing them, which is safe because it is exactly how `hks` reads FASTQ: a record that spans more lines is a parse error there, not a rank. Headers are picked by position rather than by a leading `@`, since a quality line may begin with `@`.
+The FASTQ scan takes four lines per record without parsing them, which is safe because it is exactly how `hks` reads FASTQ: a record that spans more lines is a parse error there, not a rank. Headers are picked by position rather than by a leading `@`, since a quality line may begin with `@`. sed rather than awk because on the BSD awk of macOS the awk form was ten times slower than the whole hks lookup on the same file.
 
 Without the flag the mapping is reproducible by hand, since the query file is a
 deterministic function of the input:
@@ -138,7 +138,7 @@ samtools fasta -F 0x900 -N --reference GRCh38.fasta tumor.cram | grep '^>'
 # FASTA
 grep '^>' asm.fa
 # FASTQ (four lines per record, as hks reads it)
-gzip -dc reads.fastq.gz | awk 'NR % 4 == 1'
+gzip -dc reads.fastq.gz | sed -n 'p;n;n;n' | cut -f1 | cut -d ' ' -f1 | cut -c2-
 ```
 
 ## Output

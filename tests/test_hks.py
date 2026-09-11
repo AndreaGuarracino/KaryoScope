@@ -517,6 +517,7 @@ def test_materialised_queries_tees_the_name_sidecar(
         return _Result()
 
     monkeypatch.setattr("karyoscope.core.io.hks.require_tool", lambda *a, **kw: "samtools")
+    monkeypatch.setattr("karyoscope.core.io.bgzip.require_tool", lambda name, **kw: name)
     monkeypatch.setattr("karyoscope.core.io.hks.subprocess.run", _fake_run)
 
     bam = tmp_path / "aln.bam"
@@ -529,6 +530,7 @@ def test_materialised_queries_tees_the_name_sidecar(
     assert "tee" in joined
     assert str(sidecar) in joined
     assert "samtools fasta" in joined
+    assert "| bgzip -@ 2 >" in joined, "the sidecar is bgzipped with the run's threads"
 
 
 @pytest.mark.parametrize("returncode,expect_hint", [(-9, True), (137, True), (1, False)])

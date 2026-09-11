@@ -351,9 +351,7 @@ def materialised_queries(
                 # and complete when bash returns. The name-extracting tail is
                 # shared with the scan pass so both write one file format.
                 sidecar.parent.mkdir(parents=True, exist_ok=True)
-                pipeline = (
-                    f"{shlex.join(cmd)} | tee {shlex.quote(str(tmp_fasta))} | {names_sink(sidecar)}"
-                )
+                pipeline = f"{shlex.join(cmd)} | tee {shlex.quote(str(tmp_fasta))} | {names_sink(sidecar, threads)}"
                 logger.debug("teeing query names to %s", sidecar)
                 result = subprocess.run(
                     ["bash", "-o", "pipefail", "-c", pipeline],

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import gzip
+import shutil
 from collections import OrderedDict
 from pathlib import Path
+
+import pytest
 
 from karyoscope.core.io.fasta import (
     read_fasta_contig_names,
@@ -15,6 +18,8 @@ from karyoscope.core.io.fasta import (
 from .conftest import read_fasta_records
 
 # --- reverse_complement ---------------------------------------------
+
+requires_bgzip = pytest.mark.skipif(shutil.which("bgzip") is None, reason="bgzip not on PATH")
 
 
 class TestReverseComplement:
@@ -103,6 +108,7 @@ class TestWriteFastaRecords:
         write_fasta_records({"a": "ACGT", "b": "GCTA"}, p)
         assert p.read_text() == ">a\nACGT\n>b\nGCTA\n"
 
+    @requires_bgzip
     def test_gzip_when_path_ends_gz(self, tmp_path: Path) -> None:
         p = tmp_path / "x.fa.gz"
         write_fasta_records({"a": "ACGT"}, p)
@@ -138,6 +144,7 @@ class TestRoundTrip:
         write_fasta_records(src, p)
         assert dict(read_fasta_records(p)) == src
 
+    @requires_bgzip
     def test_roundtrip_gzip(self, tmp_path: Path) -> None:
         src = {"a": "ACGTACGT", "b": "GCATGCAT"}
         p = tmp_path / "x.fa.gz"

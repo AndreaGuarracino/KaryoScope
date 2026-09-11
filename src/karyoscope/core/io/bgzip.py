@@ -1,19 +1,103 @@
-"""In-place ``bgzip`` compression of output files.
+"""``bgzip`` compression, the one compressor for every ``.gz`` KaryoScope writes.
 
-Shared by every pipeline stage that compresses its BED/FASTA outputs
-(``annotate``, ``scaffold``, ``centromeres``, ``karyotype``).
+Three shapes, one tool:
+
+* :func:`bgzip_file` compresses a finished file in place (``annotate``,
+  ``scaffold``, ``centromeres``, ``karyotype`` compress their outputs after
+  writing them).
+* :func:`open_bgzip_writer` streams text into ``bgzip`` as it is produced, for
+  writers that build their output line by line (``bin``, ``remap-bed``, the
+  FASTA/BED rewriters) -- no plain copy ever touches the disk.
+* :func:`bgzip_stage` is the compressor as a shell pipeline stage, for the
+  sidecar pipelines in :mod:`karyoscope.core.io.query_names`.
+
+bgzip rather than gzip everywhere because its output *is* a gzip stream --
+``zcat``, Python's ``gzip`` module and every other reader are unaffected --
+while it compresses in parallel (``-@``) and is tabix-indexable. The price is
+a slightly larger file from the 64 KB block boundaries.
 """
 
 from __future__ import annotations
 
+import io
 import logging
+import subprocess
 import time
 from pathlib import Path
 
-from karyoscope.core.external import require_tool, run_tool
+from karyoscope.core.external import ExternalToolError, require_tool, run_tool
 from karyoscope.diskspace import format_bytes
 
 logger = logging.getLogger(__name__)
+
+_INSTALL_HINT = "Install htslib (`conda install -c bioconda htslib`) to write .gz output."
+
+
+def _bgzip_cmd(threads: int) -> list[str]:
+    """``bgzip`` reading stdin and writing stdout, with ``-@`` when it helps."""
+    cmd = [require_tool("bgzip", install_hint=_INSTALL_HINT)]
+    if threads > 1:
+        cmd += ["-@", str(threads)]
+    return cmd
+
+
+def bgzip_stage(threads: int = 1) -> str:
+    """Shell text for ``bgzip`` as a pipeline stage (stdin -> stdout)."""
+    return " ".join(_bgzip_cmd(threads))
+
+
+class _BgzipWriter(io.TextIOWrapper):
+    """A text handle whose bytes go through a ``bgzip`` child into ``path``.
+
+    Closing it closes the child's stdin, waits for it to finish, and raises
+    :class:`ExternalToolError` if it failed -- a full disk under the output
+    surfaces as an exception at close, not as a silently truncated file.
+    """
+
+    def __init__(self, path: Path, threads: int):
+        self._path = path
+        self._sink = path.open("wb")
+        try:
+            self._proc = subprocess.Popen(
+                _bgzip_cmd(threads),
+                stdin=subprocess.PIPE,
+                stdout=self._sink,
+                stderr=subprocess.PIPE,
+            )
+        except BaseException:
+            self._sink.close()
+            raise
+        assert self._proc.stdin is not None
+        super().__init__(self._proc.stdin, encoding="utf-8", write_through=False)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            super().close()  # flushes and closes the child's stdin
+        finally:
+            # Not communicate(): it would try to flush the stdin we just closed.
+            assert self._proc.stderr is not None
+            stderr = self._proc.stderr.read()
+            self._proc.stderr.close()
+            self._proc.wait()
+            self._sink.close()
+        if self._proc.returncode != 0:
+            raise ExternalToolError(
+                cmd=self._proc.args,
+                returncode=self._proc.returncode,
+                stderr=stderr.decode(errors="replace"),
+            )
+
+
+def open_bgzip_writer(path: Path, threads: int = 1) -> io.TextIOWrapper:
+    """Open ``path`` for text writing through a streaming ``bgzip``.
+
+    A drop-in for ``gzip.open(path, "wt")``: use it as a context manager or
+    close it explicitly. Compression runs in the child as the text is
+    written, so the caller's peak disk usage is the compressed file alone.
+    """
+    return _BgzipWriter(path, threads)
 
 
 def bgzip_file(path: Path, threads: int = 1) -> Path:

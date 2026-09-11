@@ -554,17 +554,19 @@ def test_query_names_refusal_points_at_the_sidecar_flag() -> None:
     assert "--query-names-sidecar" in str(excinfo.value)
 
 
-def test_sidecar_adds_no_dependency() -> None:
-    """A FASTA/FASTQ is scanned with awk; an alignment's names come off the
-    samtools decode the run needs anyway. Nothing new to install."""
+def test_sidecar_needs_only_bgzip() -> None:
+    """A FASTA/FASTQ is scanned with sed/grep and an alignment's names come off
+    the samtools decode the run needs anyway; the sidecar itself is bgzipped."""
     from karyoscope.core.annotate import _annotate_dependencies
 
     for name in ("r.fq.gz", "asm.fa"):
         with_flag = _annotate_dependencies(
             index_type="hks", input_path=Path(name), bgzip=False, query_names_sidecar=True
         )
-        assert with_flag == ["hks"]
+        assert with_flag == ["hks", "bgzip"]
     cram = _annotate_dependencies(
         index_type="kmc", input_path=Path("t.cram"), bgzip=False, query_names_sidecar=True
     )
-    assert cram == ["get_featureIDs", "samtools"]
+    assert cram == ["get_featureIDs", "samtools", "bgzip"]
+    plain = _annotate_dependencies(index_type="hks", input_path=Path("r.fq.gz"), bgzip=False)
+    assert plain == ["hks"]

@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import IO
 
 from karyoscope import cpus as _cpus
+from karyoscope.core.io.bgzip import open_bgzip_writer
 from karyoscope.core.io.features import NOVEL_NAME
 from karyoscope.core.io.hierarchy import Hierarchy
 from karyoscope.core.smooth import chunked_seq_reader
@@ -333,8 +334,8 @@ def _open_in(path: Path) -> IO[str]:
     return path.open("r")
 
 
-def _open_out(path: Path, *, gzip_out: bool) -> IO[str]:
-    """Open ``path`` for text writing.
+def _open_out(path: Path, *, gzip_out: bool, threads: int = 1) -> IO[str]:
+    """Open ``path`` for text writing, streaming through ``bgzip`` if ``gzip_out``.
 
     Returns ``sys.stdout`` when ``path`` is ``-``. Same close-semantics
     caveat as :func:`_open_in`.
@@ -344,7 +345,7 @@ def _open_out(path: Path, *, gzip_out: bool) -> IO[str]:
 
         return sys.stdout
     if gzip_out:
-        return gzip.open(path, "wt")
+        return open_bgzip_writer(path, threads=threads)
     return path.open("w")
 
 
@@ -507,7 +508,7 @@ def bin_features(
     if not use_pool:
         # Single-threaded path: stream directly through the binner.
         in_h = _open_in(input_path)
-        out_h = _open_out(output_path, gzip_out=gzip_out)
+        out_h = _open_out(output_path, gzip_out=gzip_out, threads=pool_size)
         try:
 
             def _emit(c: str, s: int, e: int, f: str) -> None:
@@ -527,7 +528,7 @@ def bin_features(
     # semantics are preserved.
     leaf_frozen = frozenset(leaf_set) if leaf_set else None
     ctx = mp.get_context("spawn")
-    out_h = _open_out(output_path, gzip_out=gzip_out)
+    out_h = _open_out(output_path, gzip_out=gzip_out, threads=pool_size)
     try:
         with ctx.Pool(
             processes=pool_size,
