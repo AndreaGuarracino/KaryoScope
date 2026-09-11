@@ -423,12 +423,14 @@ def _assert_binned_matches_map(binned: Path, map_rows: list[MapRow] | None) -> N
     can be exhaustive rather than a sample. Run it on every binned BED before it
     reaches the renderer, however it was produced.
 
-    Subset, not equality. The map is the upper bound on sequence names and every
+    Subset, not equality. The map is the upper bound on sequence names and a
     downstream BED may carry fewer: :func:`rewrite_bed` skips a map row whose
-    contig has no records in this feature set, :func:`plan_combined_layout` omits
-    a ``(chrom, hap)`` object whose contigs are absent from the FASTA lengths
-    while :func:`combined_map_rows` still emits a row for it, and binning applies
-    a ``leaf_set``. Only a name the map does not produce is an error.
+    contig has no records in this feature set, and :func:`plan_combined_layout`
+    omits a ``(chrom, hap)`` object whose contigs are absent from the FASTA
+    lengths while :func:`combined_map_rows` still emits a row for it. (Binning's
+    ``leaf_set`` is not such a path: it prioritises leaf labels within a bin and
+    falls back to the other labels, never dropping a sequence.) Only a name the
+    map does not produce is an error.
     ``tests/test_karyotype_run.py::TestGuardsTolerateFilteredSequences`` pins
     this direction.
     """

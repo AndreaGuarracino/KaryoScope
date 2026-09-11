@@ -392,8 +392,10 @@ class TestAssertBinnedMatchesMap:
 #   lengths, and omits a whole (chrom, hap) object when that leaves the
 #   group empty; ``combined_map_rows`` emits a row per group regardless,
 #   so it is deliberately a superset.
-# * ``bin_features`` with a ``leaf_set`` reads only the requested feature
-#   set's leaves.
+#
+# (``bin_features``'s ``leaf_set`` is NOT such a path: it prioritises leaf
+# labels within a bin and falls back to the other labels, so it never drops
+# a sequence.)
 #
 # So only names present in the BED and ABSENT from the map are an error.
 # A map that lists sequences the BED does not must stay silent. These
