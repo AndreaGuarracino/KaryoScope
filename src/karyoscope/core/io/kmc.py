@@ -26,10 +26,12 @@ to do.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -310,6 +312,12 @@ def combined_bed_is_complete(combined_bed: Path) -> bool:
     return data.get("size_bytes") == st.st_size and data.get("mtime_ns") == st.st_mtime_ns
 
 
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """SIGKILL every process in ``proc``'s group; ``proc`` was started as its leader."""
+    with contextlib.suppress(ProcessLookupError):  # already gone
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+
+
 def run_get_featureids(
     *,
     db_path: Path,
@@ -545,10 +553,15 @@ def _run_get_featureids_piped_from_alignment(
                 query_names_sidecar.parent.mkdir(parents=True, exist_ok=True)
                 names_cmd = names_sink(query_names_sidecar, threads, stdin_from=fifo)
                 logger.debug("teeing query names: %s", names_cmd)
+                # Its own session, so the consumer is the leader of a process
+                # group holding the whole sed | sed | bgzip pipeline. Killing
+                # the bash alone would orphan those three, blocked on the
+                # FIFO; killing the group takes them all (see the finally).
                 names_proc = subprocess.Popen(
                     ["bash", "-o", "pipefail", "-c", names_cmd],
                     stdin=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
+                    start_new_session=True,
                 )
                 started.append(names_proc)
             samtools_proc = subprocess.Popen(
@@ -599,7 +612,10 @@ def _run_get_featureids_piped_from_alignment(
     finally:
         for proc in started:
             if proc.poll() is None:
-                proc.kill()
+                if proc is names_proc:
+                    _kill_process_group(proc)
+                else:
+                    proc.kill()
             try:
                 proc.wait(timeout=30)
             except subprocess.TimeoutExpired:  # pragma: no cover - a stuck child
