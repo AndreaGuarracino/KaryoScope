@@ -54,6 +54,9 @@ def fake_children(monkeypatch: pytest.MonkeyPatch):
     _FakeProc.instances = []
     monkeypatch.setattr(kmc.subprocess, "Popen", _FakeProc)
     monkeypatch.setattr(kmc, "require_tool", lambda name, **kw: name)
+    # The names sink resolves bgzip; the unit CI job has no htslib, and these
+    # tests are about lifecycle, not compression.
+    monkeypatch.setattr("karyoscope.core.io.bgzip.require_tool", lambda name, **kw: name)
     monkeypatch.setattr(kmc, "get_featureids_binary", lambda: "get_featureIDs")
     return _FakeProc.instances
 
