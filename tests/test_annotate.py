@@ -543,3 +543,28 @@ def test_assemblies_still_default_to_names(tmp_path: Path, monkeypatch) -> None:
 def test_explicit_no_query_names_forces_ranks_on_an_assembly(tmp_path: Path, monkeypatch) -> None:
     """The override works downward too, for databases with long feature names."""
     assert _hks_cmd_for(tmp_path, monkeypatch, input_name="asm.fa", query_names=False) is False
+
+
+def test_query_names_refusal_points_at_the_sidecar_flag() -> None:
+    """The refusal should say how to get the names anyway, not just say no."""
+    from karyoscope.core.annotate import _reject_query_names_for_reads
+
+    with pytest.raises(KaryoscopeError) as excinfo:
+        _reject_query_names_for_reads([Path("reads.fq.gz")], True)
+    assert "--query-names-sidecar" in str(excinfo.value)
+
+
+def test_sidecar_adds_no_dependency() -> None:
+    """A FASTA/FASTQ is scanned with awk; an alignment's names come off the
+    samtools decode the run needs anyway. Nothing new to install."""
+    from karyoscope.core.annotate import _annotate_dependencies
+
+    for name in ("r.fq.gz", "asm.fa"):
+        with_flag = _annotate_dependencies(
+            index_type="hks", input_path=Path(name), bgzip=False, query_names_sidecar=True
+        )
+        assert with_flag == ["hks"]
+    cram = _annotate_dependencies(
+        index_type="kmc", input_path=Path("t.cram"), bgzip=False, query_names_sidecar=True
+    )
+    assert cram == ["get_featureIDs", "samtools"]

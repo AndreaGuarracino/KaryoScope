@@ -19,6 +19,7 @@ karyoscope annotate -i INPUT [OPTIONS]
 | `-i`, `--input FILE` | Input sequence file. Accepts FASTA (`.fasta`/`.fa`/`.fna`, plain or `.gz`), FASTQ (`.fastq`/`.fq`, plain or `.gz`), BAM (`.bam`) or CRAM (`.cram`). BAM/CRAM inputs are converted with `samtools fasta` (requires `samtools` on PATH); CRAM also requires `--reference`. **[required]** |
 | `--reference FILE` | Reference FASTA a CRAM input was aligned against. **Required for `.cram`**, ignored otherwise. See [CRAM input](#cram-input). |
 | `--query-names` / `--no-query-names` | Identify output sequences by name rather than ordinal rank. Assemblies default to names; **refused for read-level input**, which always uses ranks. See [Paired-end reads](#paired-end-reads). |
+| `--query-names-sidecar` | Also write `<outdir>/<input>.query_names.txt.gz` for each input: every record's name, one per line, in the order the query assigns ranks (line N+1 is rank N). This is how rank-identified read-level output is joined back to read names. For BAM/CRAM on the HKS backend it is teed off the decode `annotate` performs anyway, so it is nearly free; for FASTA/FASTQ input (either backend) it is one `awk` pass over the file, and for BAM/CRAM on the KMC backend a separate decode. See [Query names](#query-names). |
 | `-o`, `--outdir DIRECTORY` | Directory to write output BEDs into. Default: same directory as `--input`. |
 | `--db TEXT` | Database id to use (e.g., `KS_human_CHM13_v2`). Default: the unique installed database if there's exactly one. |
 | `--db-root DIRECTORY` | Override the database root directory (default: `$KARYOSCOPE_DB` or `~/.karyoscope/db/`). |
@@ -45,6 +46,9 @@ karyoscope annotate -i asm.fa --feature-set chromosome -o results/
 
 # Read-level input (FASTQ): faster writes when output order doesn't matter
 karyoscope annotate -i reads.fastq.gz -o results/ --no-preserve-order
+
+# Read-level input, keeping the rank -> read-name mapping next to the output
+karyoscope annotate -i tumor.cram --reference GRCh38.fasta -o results/ --query-names-sidecar
 ```
 
 ## CRAM input
@@ -92,20 +96,50 @@ which is fine for an assembly's few thousand contigs and fatal for reads. Measur
 index, and the run is OOM-killed roughly 20 minutes in, having already spent 15 of them
 decoding. Raising the memory limit buys nothing but longer identifiers.
 
-Nothing is lost. Rank N is the Nth record of the query file, and for an alignment input
-the query file is a deterministic function of the source, so the mapping is reproducible
-whenever it is actually needed:
-
-```bash
-samtools fasta -F 0x900 -N --reference GRCh38.fasta tumor.cram | grep '^>'
-```
-
-Line N+1 of that stream is rank N. Mates group by stripping the `/1`,`/2` suffix — which
-is why `-N` is forced during the decode. Materialising it once as a bgzipped sidecar is
-usually cheaper than regenerating it per query.
+Nothing is lost. Rank N is the Nth record of the query file, so the mapping back to read
+names is a property of the input, and `--query-names-sidecar` records it next to the output
+(see [Query names](#query-names)). Mates group by stripping the `/1`,`/2` suffix — which is
+why `-N` is forced during the alignment decode. In a coordinate-sorted BAM/CRAM the two
+mates of a fragment are nowhere near each other in rank, so pairing needs the names; in
+split R1/R2 FASTQ files mate *i* of one file is mate *i* of the other, and the ranks pair
+by themselves.
 
 Note the coordinates are k-mer offsets **within each read**, not genomic positions: a
 151 bp read queried at k=31 spans 0..121.
+
+## Query names
+
+`--query-names-sidecar` writes `<outdir>/<input>.query_names.txt.gz` for each input: one
+record name per line, in the order the query assigns ranks, so line N+1 is rank N. The name
+is the record header up to its first whitespace (`SRR123.7` from `@SRR123.7 1 length=151`),
+with the `/1`,`/2` mate suffix for BAM/CRAM input. The file is plain `gzip`, not bgzip. It is
+named from the input alone — not the database — because the mapping does not depend on
+what the reads were annotated against, so one CRAM run against two databases yields one
+sidecar.
+
+What it costs depends on where the names come from:
+
+| Input | Backend | How the names are produced |
+|---|---|---|
+| BAM / CRAM | HKS | Teed off the `samtools fasta` decode `annotate` runs anyway. Nearly free; regenerating the mapping afterwards is a second full decode (~25 min on a 56 GB CRAM). |
+| FASTA / FASTQ | either | One `awk` pass over the file (`gzip -dc` in front of it for `.gz`), picking header lines by `>` for FASTA and by position — every fourth line — for FASTQ. One extra read of the input, small next to a lookup that reads it once per feature set; decompression is the whole cost. |
+| BAM / CRAM | KMC | A separate `samtools fasta` pass — a second decode, because `get_featureIDs` is fed by a streaming pipe that leaves no seekable copy behind. |
+
+Only `hks` emits ranks; `get_featureIDs` (the KMC backend) always writes names into the BED, so there the sidecar is written for consistency rather than out of necessity.
+
+The FASTQ scan takes four lines per record without parsing them, which is safe because it is exactly how `hks` reads FASTQ: a record that spans more lines is a parse error there, not a rank. Headers are picked by position rather than by a leading `@`, since a quality line may begin with `@`.
+
+Without the flag the mapping is reproducible by hand, since the query file is a
+deterministic function of the input:
+
+```bash
+# BAM / CRAM: the same decode annotate performs
+samtools fasta -F 0x900 -N --reference GRCh38.fasta tumor.cram | grep '^>'
+# FASTA
+grep '^>' asm.fa
+# FASTQ (four lines per record, as hks reads it)
+gzip -dc reads.fastq.gz | awk 'NR % 4 == 1'
+```
 
 ## Output
 
@@ -113,6 +147,8 @@ For each feature set, `annotate` writes up to two BEDs:
 
 - Presmoothed (raw): `<input>.<dbid>.<feature_set>.presmoothed.bed[.gz]`
 - Smoothed (hierarchy-smoothed): `<input>.<dbid>.<feature_set>.smoothed.bed[.gz]`
+
+With `--query-names-sidecar`, one more file per input, independent of the database: `<input>.query_names.txt.gz` (see [Query names](#query-names)).
 
 Each BED's 4th column is the human-readable feature name. k-mers absent from the index render as `novel`. The `.gz` suffix is present unless `--no-bgzip` is passed; `--no-bgzip` keeps BEDs as plain text.
 

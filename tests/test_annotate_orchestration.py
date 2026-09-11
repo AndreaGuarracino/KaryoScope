@@ -432,3 +432,53 @@ def test_batch_multi_input_shares_one_backend_invocation(
     for p in (a, b):
         assert results[p].presmoothed_paths["chromosome"].name.startswith(f"{p.stem}.{HKS_DB_ID}.")
         assert results[p].presmoothed_paths["chromosome"].is_file()
+
+
+def test_kmc_writes_the_query_names_sidecar_in_its_own_pass(
+    populated_db_root: Path,
+    query_fasta: Path,
+    tmp_path: Path,
+    stub_externals: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The KMC backend has no decode to tee the names off, so it runs the scan
+    pass itself, names the file from the input stem alone, and reports it."""
+    calls: list[tuple] = []
+
+    def fake_write(input_path, sidecar, *, reference=None, threads=0, capture=False):
+        calls.append((input_path, sidecar, reference, threads))
+        sidecar.write_bytes(b"")
+        return sidecar
+
+    monkeypatch.setattr(ann, "write_query_names_sidecar", fake_write)
+
+    out = tmp_path / "out"
+    result = annotate(
+        input_path=query_fasta,
+        output_dir=out,
+        db_root=populated_db_root,
+        threads=3,
+        query_names_sidecar=True,
+    )
+    expected = out / "q.query_names.txt.gz"
+    assert calls == [(query_fasta, expected, None, 3)]
+    assert result.query_names_sidecar == expected
+    assert expected.is_file()
+    assert expected not in result.all_output_paths, "BEDs only; the sidecar is reported apart"
+
+
+def test_kmc_without_the_flag_writes_no_sidecar(
+    populated_db_root: Path,
+    query_fasta: Path,
+    tmp_path: Path,
+    stub_externals: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*a, **kw):
+        raise AssertionError("sidecar not requested")
+
+    monkeypatch.setattr(ann, "write_query_names_sidecar", boom)
+    result = annotate(
+        input_path=query_fasta, output_dir=tmp_path / "out", db_root=populated_db_root, threads=1
+    )
+    assert result.query_names_sidecar is None

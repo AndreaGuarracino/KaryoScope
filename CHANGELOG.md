@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--query-names-sidecar` no longer does nothing, silently, outside its
+  original case.** Introduced in 2.3.0 for BAM/CRAM on the HKS backend, the
+  flag was accepted for every input and backend but only acted there: a
+  FASTQ input on HKS, or any input on the KMC backend, ran to completion with
+  no sidecar and no warning. It now writes `<outdir>/<input>.query_names.txt.gz`
+  for every input on both backends. Where there is a decode to tee it off
+  (BAM/CRAM on HKS) it still comes for free; a FASTA/FASTQ input, which both
+  query tools read directly, gets one `awk` pass over the file (one extra
+  read of the input, small next to a lookup that reads it once per feature
+  set; FASTQ headers are taken every fourth line, which is how `hks` itself
+  parses FASTQ), and a BAM/CRAM on KMC gets a second `samtools fasta` pass,
+  since `get_featureIDs` is fed by a pipe that leaves no seekable copy behind.
+  No new dependency. The name-extracting tail is now defined once and shared by
+  the tee and the scan pass, so the file has one format: the header up to its
+  first whitespace, one per line, line N+1 is rank N, plain gzip. The sidecar
+  is reported in the `Wrote:` block and on `AnnotateResult.query_names_sidecar`,
+  and the `--query-names` refusal on read-level input now points at the flag.
+  The `annotate` reference page, which described the sidecar's purpose
+  without ever naming the flag, now documents it.
+
 - **`build --spec` no longer discards `--external-memory`, `--threads`,
   `--mem-gigas` and `--forward-only`.** With a spec file the command returned
   the YAML as-is, so those four flags were accepted and silently ignored:

@@ -108,12 +108,14 @@ logger = logging.getLogger(__name__)
     "--query-names-sidecar",
     is_flag=True,
     default=False,
-    help="For BAM/CRAM input, also write <outdir>/<input>.query_names.txt.gz: "
-    "the record names in the order hks assigns ranks, one per line. Teed off the "
-    "decode annotate performs anyway, so it is nearly free -- whereas recovering "
-    "the same mapping afterwards costs a second full decode of the alignment "
-    "(~25 min on a 56 GB CRAM). Needed to join rank-identified output back to "
-    "read names, e.g. to pair paired-end mates.",
+    help="Also write <outdir>/<input>.query_names.txt.gz for each input: every "
+    "record's name, one per line, in the order the query assigns ranks (line N+1 "
+    "is rank N). This is how rank-identified read-level output is joined back to "
+    "read names, e.g. to pair paired-end mates. For BAM/CRAM on the HKS backend "
+    "it is teed off the decode annotate performs anyway, so it is nearly free -- "
+    "recovering the same mapping afterwards costs a second full decode (~25 min "
+    "on a 56 GB CRAM). For FASTA/FASTQ input (either backend) it is one awk pass "
+    "over the file; for BAM/CRAM on the KMC backend it is a separate decode.",
 )
 @click.option(
     "--reference",
@@ -330,3 +332,5 @@ def cmd(
             click.echo(f"  {fs} (smoothed):    {path}")
         if result.combined_intermediate is not None:
             click.echo(f"  (intermediate: {result.combined_intermediate})")
+        if result.query_names_sidecar is not None:
+            click.echo(f"  query names:            {result.query_names_sidecar}")
