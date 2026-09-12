@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
     "output_path",
     type=click.Path(dir_okay=False, path_type=Path),
     required=True,
-    help="Output BED in scaffolded coordinates. Gzipped iff the path ends in .gz.",
+    help="Output BED in scaffolded coordinates. bgzipped iff the path ends in .gz.",
 )
 @click.option(
     "--strict",

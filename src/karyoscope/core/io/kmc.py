@@ -26,10 +26,12 @@ to do.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -42,6 +44,7 @@ from karyoscope.core.external import (
     require_tool,
     run_tool,
 )
+from karyoscope.core.io.query_names import names_sink
 from karyoscope.exceptions import KaryoscopeError
 
 logger = logging.getLogger(__name__)
@@ -309,6 +312,12 @@ def combined_bed_is_complete(combined_bed: Path) -> bool:
     return data.get("size_bytes") == st.st_size and data.get("mtime_ns") == st.st_mtime_ns
 
 
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """SIGKILL every process in ``proc``'s group; ``proc`` was started as its leader."""
+    with contextlib.suppress(ProcessLookupError):  # already gone
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+
+
 def run_get_featureids(
     *,
     db_path: Path,
@@ -319,6 +328,7 @@ def run_get_featureids(
     input_format: str | None = None,
     reference: Path | None = None,
     capture: bool = False,
+    query_names_sidecar: Path | None = None,
 ) -> Path:
     """Invoke ``get_featureIDs`` with the given options.
 
@@ -383,6 +393,7 @@ def run_get_featureids(
             binary=binary,
             db_path=db_path,
             alignment_path=input_path,
+            query_names_sidecar=query_names_sidecar,
             output_dir=output_dir,
             threads=threads,
             prefix=prefix,
@@ -426,6 +437,7 @@ def _run_get_featureids_piped_from_alignment(
     prefix: str,
     reference: Path | None,
     capture: bool,
+    query_names_sidecar: Path | None = None,
 ) -> Path:
     """Stream ``samtools fasta <aln>`` into ``get_featureIDs --input -``.
 
@@ -455,10 +467,19 @@ def _run_get_featureids_piped_from_alignment(
     byte-identical name; without the suffix they are indistinguishable in the
     output.
 
+    ``query_names_sidecar`` asks for the record names to be teed off THIS
+    decode into that path, in the order the records stream. A ``tee`` sits
+    between samtools and get_featureIDs; its second output is a FIFO that a
+    ``sed | bgzip`` consumer reads (:func:`names_sink`). Decoding the
+    alignment a second time just to list its names would cost as much as the
+    decode itself (~25 min on a 56 GB CRAM), so the names ride along instead.
+
     Error handling: if ``get_featureIDs`` exits non-zero we report
     that (it's the more informative failure for the user). If it
     succeeds but ``samtools`` exited non-zero we report the samtools
-    error (rare; usually a malformed BAM or a mismatched reference).
+    error (rare; usually a malformed BAM or a mismatched reference). The
+    tee and the names consumer come after those two, and a failed run never
+    leaves a partial sidecar behind.
     """
     if alignment_path.suffix.lower() == ".cram" and reference is None:
         raise KaryoscopeError(
@@ -500,34 +521,113 @@ def _run_get_featureids_piped_from_alignment(
     ]
     logger.debug("piping: %s | %s", " ".join(samtools_cmd), " ".join(getfid_cmd))
 
-    # samtools stderr goes to a temp file, not a pipe: nothing drains a
-    # pipe until get_featureIDs finishes, so a warning-heavy BAM (one
-    # line per malformed record) could fill the ~64 KB pipe buffer,
-    # block samtools mid-write, stall its stdout, and deadlock the
-    # whole pipeline. A file has no such limit.
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errf:
-        samtools_proc = subprocess.Popen(
-            samtools_cmd,
-            stdout=subprocess.PIPE,
-            stderr=errf,
-            text=True,
-        )
-        try:
-            getfid_proc = subprocess.run(
-                getfid_cmd,
-                stdin=samtools_proc.stdout,
-                capture_output=True,
+    # Every child and the FIFO live inside ONE try/finally. If launching a
+    # stage raises (PermissionError on the binary, KeyboardInterrupt, a
+    # failed mkfifo) the stages already running are killed and reaped, the
+    # FIFO directory is removed and a partial sidecar is deleted -- none of
+    # that may depend on the happy path having been reached.
+    samtools_proc: subprocess.Popen | None = None
+    tee_proc: subprocess.Popen | None = None
+    names_proc: subprocess.Popen | None = None
+    fifo_dir: Path | None = None
+    started: list[subprocess.Popen] = []
+    tee_returncode, tee_stderr = 0, ""
+    names_returncode, names_stderr = 0, ""
+    ok = False
+    try:
+        # samtools stderr goes to a temp file, not a pipe: nothing drains a
+        # pipe until get_featureIDs finishes, so a warning-heavy BAM (one
+        # line per malformed record) could fill the ~64 KB pipe buffer,
+        # block samtools mid-write, stall its stdout, and deadlock the
+        # whole pipeline. A file has no such limit.
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errf:
+            if query_names_sidecar is not None:
+                # The consumer opens the FIFO for reading and blocks until tee
+                # opens it for writing; tee blocks the other way round. Start
+                # the consumer first so tee never waits on a reader that has
+                # not been launched. tee's stdout is get_featureIDs' stdin, so
+                # the decode is still one linear stream.
+                fifo_dir = Path(tempfile.mkdtemp(prefix="ks_names_", dir=output_dir))
+                fifo = fifo_dir / "decode.fifo"
+                os.mkfifo(fifo)
+                query_names_sidecar.parent.mkdir(parents=True, exist_ok=True)
+                names_cmd = names_sink(query_names_sidecar, threads, stdin_from=fifo)
+                logger.debug("teeing query names: %s", names_cmd)
+                # Its own session, so the consumer is the leader of a process
+                # group holding the whole sed | sed | bgzip pipeline. Killing
+                # the bash alone would orphan those three, blocked on the
+                # FIFO; killing the group takes them all (see the finally).
+                names_proc = subprocess.Popen(
+                    ["bash", "-o", "pipefail", "-c", names_cmd],
+                    stdin=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                started.append(names_proc)
+            samtools_proc = subprocess.Popen(
+                samtools_cmd,
+                stdout=subprocess.PIPE,
+                stderr=errf,
                 text=True,
-                check=False,
             )
-        finally:
-            # Closing the read end before wait() lets samtools see SIGPIPE
-            # cleanly if get_featureIDs exited early.
-            if samtools_proc.stdout is not None:
-                samtools_proc.stdout.close()
-        samtools_returncode = samtools_proc.wait()
-        errf.seek(0)
-        samtools_stderr = errf.read()
+            started.append(samtools_proc)
+            getfid_stdin = samtools_proc.stdout
+            if query_names_sidecar is not None:
+                tee_proc = subprocess.Popen(
+                    [require_tool("tee"), str(fifo)],
+                    stdin=samtools_proc.stdout,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                started.append(tee_proc)
+                getfid_stdin = tee_proc.stdout
+            try:
+                getfid_proc = subprocess.run(
+                    getfid_cmd,
+                    stdin=getfid_stdin,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            finally:
+                # Closing the read ends before wait() lets the upstream stages
+                # see SIGPIPE cleanly if get_featureIDs exited early.
+                if tee_proc is not None and tee_proc.stdout is not None:
+                    tee_proc.stdout.close()
+                if samtools_proc.stdout is not None:
+                    samtools_proc.stdout.close()
+            samtools_returncode = samtools_proc.wait()
+            errf.seek(0)
+            samtools_stderr = errf.read()
+
+        if tee_proc is not None:
+            _, err = tee_proc.communicate()
+            tee_returncode, tee_stderr = tee_proc.returncode, err.decode(errors="replace")
+        if names_proc is not None:
+            _, err = names_proc.communicate()
+            names_returncode, names_stderr = names_proc.returncode, err.decode(errors="replace")
+        ok = not (
+            getfid_proc.returncode or samtools_returncode or tee_returncode or names_returncode
+        )
+    finally:
+        for proc in started:
+            if proc.poll() is None:
+                if proc is names_proc:
+                    _kill_process_group(proc)
+                else:
+                    proc.kill()
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:  # pragma: no cover - a stuck child
+                logger.warning("child %s did not exit after SIGKILL", proc.args)
+            for handle in (proc.stdin, proc.stdout, proc.stderr):
+                if handle is not None and not handle.closed:
+                    handle.close()
+        if fifo_dir is not None:
+            shutil.rmtree(fifo_dir, ignore_errors=True)
+        if query_names_sidecar is not None and not ok:
+            # Whatever failed or was interrupted, the sidecar is not trustworthy.
+            query_names_sidecar.unlink(missing_ok=True)
 
     # Order matters: downstream failure (get_featureIDs) is the more
     # actionable error to surface first. Both paths route through
@@ -546,6 +646,16 @@ def _run_get_featureids_piped_from_alignment(
             returncode=samtools_returncode,
             stderr=samtools_stderr,
         )
+    if tee_returncode != 0:
+        raise ExternalToolError(cmd=["tee"], returncode=tee_returncode, stderr=tee_stderr)
+    if names_returncode != 0:
+        raise ExternalToolError(
+            cmd=["bash", "-c", "<query-names sidecar>"],
+            returncode=names_returncode,
+            stderr=names_stderr,
+        )
+    if query_names_sidecar is not None:
+        logger.info("wrote query-name sidecar %s", query_names_sidecar)
 
     if not capture:
         # Forward subprocess output to our own stdout/stderr so the

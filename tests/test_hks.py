@@ -517,6 +517,7 @@ def test_materialised_queries_tees_the_name_sidecar(
         return _Result()
 
     monkeypatch.setattr("karyoscope.core.io.hks.require_tool", lambda *a, **kw: "samtools")
+    monkeypatch.setattr("karyoscope.core.io.bgzip.require_tool", lambda name, **kw: name)
     monkeypatch.setattr("karyoscope.core.io.hks.subprocess.run", _fake_run)
 
     bam = tmp_path / "aln.bam"
@@ -529,6 +530,7 @@ def test_materialised_queries_tees_the_name_sidecar(
     assert "tee" in joined
     assert str(sidecar) in joined
     assert "samtools fasta" in joined
+    assert "| bgzip -@ 2 >" in joined, "the sidecar is bgzipped with the run's threads"
 
 
 @pytest.mark.parametrize("returncode,expect_hint", [(-9, True), (137, True), (1, False)])
@@ -553,3 +555,46 @@ def test_build_base_formats_construction_hint_only_for_oom(
         run_hks_build_base(output_path=tmp_path / "b.hksb", s=31, input_path=tmp_path / "g.fa")
     assert (HKS_BUILD_OOM_HINT in str(exc.value)) is expect_hint
     assert HKS_OOM_HINT not in str(exc.value)
+
+
+def test_materialised_queries_scans_names_for_fastq(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A FASTQ has no decode to tee off, so its sidecar is a scan pass of its
+    own -- and the FASTQ itself still passes through untouched as the query."""
+    from karyoscope.core.io.hks import materialised_queries
+
+    calls: list[Path] = []
+
+    def _fake_write(input_path, sidecar, **kwargs):
+        calls.append((input_path, sidecar))
+        return sidecar
+
+    monkeypatch.setattr("karyoscope.core.io.hks.write_query_names_sidecar", _fake_write)
+    ran: list[object] = []
+    monkeypatch.setattr(
+        "karyoscope.core.io.hks.subprocess.run", lambda *a, **kw: ran.append(a) or None
+    )
+
+    fq = tmp_path / "reads.fq.gz"
+    fq.write_bytes(b"")
+    sidecar = tmp_path / "reads.query_names.txt.gz"
+    with materialised_queries([fq], threads=2, query_names_sidecar={fq: sidecar}) as resolved:
+        assert resolved[fq] == fq
+    assert calls == [(fq, sidecar)]
+    assert ran == [], "no samtools decode for a FASTQ"
+
+
+def test_materialised_queries_does_not_scan_fastq_without_a_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from karyoscope.core.io.hks import materialised_queries
+
+    def _boom(*a, **kw):
+        raise AssertionError("no sidecar requested, nothing should be scanned")
+
+    monkeypatch.setattr("karyoscope.core.io.hks.write_query_names_sidecar", _boom)
+    fq = tmp_path / "reads.fastq"
+    fq.write_bytes(b"")
+    with materialised_queries([fq]) as resolved:
+        assert resolved[fq] == fq

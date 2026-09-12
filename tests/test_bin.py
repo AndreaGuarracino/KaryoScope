@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import shutil
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,8 @@ from karyoscope.core.io.hierarchy import Hierarchy, HierarchyRow
 from karyoscope.exceptions import BinError
 
 # --- _pick_winner ---------------------------------------------------
+
+requires_bgzip = pytest.mark.skipif(shutil.which("bgzip") is None, reason="bgzip not on PATH")
 
 
 class TestPickWinner:
@@ -242,6 +245,7 @@ class TestBinFeaturesFile:
         bin_features(src, dst, bin_size=100)
         assert self._read_bed(dst) == [("chr1", 0, 300, "A")]
 
+    @requires_bgzip
     def test_gzip_in_gzip_out(self, tmp_path: Path) -> None:
         src = tmp_path / "in.bed.gz"
         dst = tmp_path / "out.bed.gz"
@@ -386,6 +390,7 @@ class TestBinFeaturesThreaded:
         bin_features(src, dst2, bin_size=100, leaf_set=leaf, threads=2, chunk_size=1)
         assert dst1.read_text() == dst2.read_text()
 
+    @requires_bgzip
     def test_gzip_io_threads_match(self, tmp_path: Path) -> None:
         # Confirm the gzipped-output path works through the pool too.
         rows = [("chr1", i * 100, (i + 1) * 100, "X") for i in range(20)]

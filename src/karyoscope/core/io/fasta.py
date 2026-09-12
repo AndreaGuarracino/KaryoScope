@@ -29,6 +29,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import IO
 
+from karyoscope.core.io.bgzip import open_bgzip_writer
+
 #: IUPAC complement table. Includes lowercase so soft-masked
 #: sequence remains soft-masked after reverse-complementing.
 _COMPLEMENT = str.maketrans(
@@ -55,8 +57,9 @@ def _open_in(path: Path) -> IO[str]:
 
 
 def _open_out(path: Path, *, gzip_out: bool) -> IO[str]:
+    """Open ``path`` for text writing, streaming through ``bgzip`` if ``gzip_out``."""
     if gzip_out:
-        return gzip.open(path, "wt")
+        return open_bgzip_writer(path)
     return path.open("w")
 
 
