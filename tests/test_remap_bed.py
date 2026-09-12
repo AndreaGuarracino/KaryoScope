@@ -9,6 +9,7 @@ confirm the wrapper validates correctly and still delegates the rewrite.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,8 @@ from karyoscope.cli import main
 from karyoscope.core.io.scaffold_map import MapRow, write_map
 from karyoscope.core.scaffold import remap_bed_with_map
 from karyoscope.exceptions import ScaffoldError
+
+requires_bgzip = pytest.mark.skipif(shutil.which("bgzip") is None, reason="bgzip not on PATH")
 
 
 def _row(**kw: object) -> MapRow:
@@ -136,6 +139,7 @@ def test_empty_map_is_error(tmp_path: Path) -> None:
         remap_bed_with_map(bed, tmp_path / "out.bed", mp)
 
 
+@requires_bgzip
 def test_gzip_output_inferred_from_suffix(tmp_path: Path) -> None:
     import gzip
 

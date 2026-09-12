@@ -60,6 +60,7 @@ def stub_externals(monkeypatch: pytest.MonkeyPatch) -> dict:
 
     def fake_get_featureids(*, db_path, input_path, output_dir, threads, prefix, **kw):
         calls["get_featureids"] += 1
+        calls["get_featureids_kwargs"] = kw
         bed = combined_bed_path(output_dir, prefix)
         bed.write_text(_COMBINED_LINES)
         write_combined_marker(bed, prefix=prefix, db_path=db_path, input_path=input_path)
@@ -432,3 +433,84 @@ def test_batch_multi_input_shares_one_backend_invocation(
     for p in (a, b):
         assert results[p].presmoothed_paths["chromosome"].name.startswith(f"{p.stem}.{HKS_DB_ID}.")
         assert results[p].presmoothed_paths["chromosome"].is_file()
+
+
+def test_kmc_writes_the_query_names_sidecar_in_its_own_pass(
+    populated_db_root: Path,
+    query_fasta: Path,
+    tmp_path: Path,
+    stub_externals: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The KMC backend has no decode to tee the names off, so it runs the scan
+    pass itself, names the file from the input stem alone, and reports it."""
+    calls: list[tuple] = []
+
+    def fake_write(input_path, sidecar, *, reference=None, threads=0, capture=False):
+        calls.append((input_path, sidecar, reference, threads))
+        sidecar.write_bytes(b"")
+        return sidecar
+
+    monkeypatch.setattr(ann, "write_query_names_sidecar", fake_write)
+
+    out = tmp_path / "out"
+    result = annotate(
+        input_path=query_fasta,
+        output_dir=out,
+        db_root=populated_db_root,
+        threads=3,
+        query_names_sidecar=True,
+    )
+    expected = out / "q.query_names.txt.gz"
+    assert calls == [(query_fasta, expected, None, 3)]
+    assert result.query_names_sidecar == expected
+    assert expected.is_file()
+    assert expected not in result.all_output_paths, "BEDs only; the sidecar is reported apart"
+
+
+def test_kmc_without_the_flag_writes_no_sidecar(
+    populated_db_root: Path,
+    query_fasta: Path,
+    tmp_path: Path,
+    stub_externals: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*a, **kw):
+        raise AssertionError("sidecar not requested")
+
+    monkeypatch.setattr(ann, "write_query_names_sidecar", boom)
+    result = annotate(
+        input_path=query_fasta, output_dir=tmp_path / "out", db_root=populated_db_root, threads=1
+    )
+    assert result.query_names_sidecar is None
+
+
+def test_kmc_tees_an_alignment_sidecar_off_the_decode(
+    populated_db_root: Path,
+    tmp_path: Path,
+    stub_externals: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A BAM's names ride along the streaming decode inside run_get_featureids;
+    no second pass is started for them."""
+    monkeypatch.setattr(ann.preflight, "require", lambda *a, **kw: None)
+
+    def boom(*a, **kw):
+        raise AssertionError("an alignment must not get a scan pass of its own")
+
+    monkeypatch.setattr(ann, "write_query_names_sidecar", boom)
+    bam = tmp_path / "aln.bam"
+    bam.write_bytes(b"BAM\x01")
+    monkeypatch.setattr(ann, "estimate_input_bases", lambda *a, **kw: 100)
+    out = tmp_path / "out"
+    result = annotate(
+        input_path=bam,
+        output_dir=out,
+        db_root=populated_db_root,
+        threads=1,
+        query_names_sidecar=True,
+        check_space=False,
+    )
+    expected = out / "aln.query_names.txt.gz"
+    assert stub_externals["get_featureids_kwargs"]["query_names_sidecar"] == expected
+    assert result.query_names_sidecar == expected

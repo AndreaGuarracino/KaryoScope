@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Every `.gz` KaryoScope writes is now bgzip.** `bin -o x.bed.gz`,
+  `remap-bed -o x.bed.gz`, the scaffold BED/FASTA rewriters and the
+  query-names sidecar used Python's `gzip` module or `gzip(1)`, while
+  `annotate`, `scaffold`, `centromeres` and `karyotype` bgzipped their outputs
+  -- two containers for one file extension, documented as "gzipped" in one
+  place and "bgzipped" in another. bgzip output is a gzip stream, so nothing
+  that reads these files changes; what changes is that compression runs in
+  parallel (`bgzip -@`), the files are tabix-indexable, and the line-by-line
+  writers stream into `bgzip` as they go rather than compressing in-process,
+  so the compressed file is the only copy that ever touches the disk. `bgzip`
+  is therefore required whenever a `.gz` output is requested, including
+  `--query-names-sidecar`.
+
 ### Fixed
 
 - **A contig's chromosome is assigned by annotated bp, not by bin widths.**
@@ -19,6 +34,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memory is O(sequences × labels)); the bin-width path remains as a fallback for
   callers that have only the binned view. Over 972 HPRC contigs 2.26 % change
   assignment, almost all small acrocentric contigs swapping among acrocentrics.
+
+- **`--query-names-sidecar` no longer does nothing, silently, outside its
+  original case.** Introduced in 2.3.0 for BAM/CRAM on the HKS backend, the
+  flag was accepted for every input and backend but only acted there: a
+  FASTQ input on HKS, or any input on the KMC backend, ran to completion with
+  no sidecar and no warning. It now writes `<outdir>/<input>.query_names.txt.gz`
+  for every input on both backends. Where there is a decode to tee it off
+  it still comes for free: BAM/CRAM on HKS as before, and BAM/CRAM on KMC by
+  a `tee` into a FIFO on the decode already streaming into `get_featureIDs`.
+  A FASTA/FASTQ input, which both query tools read directly, gets one extra
+  streaming read of the file that selects header lines with `sed` (every
+  fourth line for FASTQ, which is how `hks` itself parses FASTQ; ~650 MB/s
+  measured; a small fraction next to `hks`, which reads the input once per
+  feature set, and one extra read of equal size next to `get_featureIDs`,
+  which reads it once). Gzip and FASTA-vs-FASTQ are detected from the bytes
+  as `hks` does, not from the filename. `bgzip` is the only tool involved
+  beyond the decode. The name-extracting tail is now defined once and shared
+  by both tees and the scan pass, so the file has one format: the header's
+  first whitespace-delimited token after its leading byte, exactly as `hks`
+  names a record (leading whitespace skipped, CR/VT/FF count as whitespace),
+  one per line, line N+1 is rank N, bgzip. The sidecar
+  is reported in the `Wrote:` block and on `AnnotateResult.query_names_sidecar`,
+  and the `--query-names` refusal on read-level input now points at the flag.
+  The `annotate` reference page, which described the sidecar's purpose
+  without ever naming the flag, now documents it.
+
+- **`build --spec` no longer discards `--external-memory`, `--threads`,
+  `--mem-gigas` and `--forward-only`.** With a spec file the command returned
+  the YAML as-is, so those four flags were accepted and silently ignored:
+  `karyoscope build --spec build.yaml --external-memory /scratch` ran the
+  in-memory k-mer sort and was OOM-killed at 48 GB on a human genome (50 GB in
+  55 s). A flag given on the command line now overrides the spec's `build:`
+  block; a flag omitted from the command line keeps the spec's value, so
+  `build: {threads: 16}` is not clobbered by `--threads`'s default of 4.
+  Database-definition flags (including `--s`, `--db-version`, `--hierarchy`,
+  `--priority`, `--colors`, `--flatten` and `--variable-k`) are now rejected
+  alongside `--spec` instead of being silently ignored, even when an explicit
+  value equals the command-line default.
+- **An OOM-killed `hks build-base` gets construction advice, not lookup
+  advice.** The hint appended to the error said "hks holds the index in
+  memory, ~10 GB, request 16 GB" -- true of `annotate`, wrong by an order of
+  magnitude for a build, which sorts every k-mer of the input in RAM (~70-80 GB
+  for a human genome at k <= 31). The build hint now points at
+  `--external-memory` / `build: external_memory:` (~14-20 GB) and at the
+  measured table in `docs/commands/build.md`.
 
 - **Haplotype labels no longer collapse onto the same character.** The karyotype
   column designator was `h<N>` only for a literal `hap<digits>` label and the

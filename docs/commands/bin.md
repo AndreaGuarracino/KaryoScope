@@ -17,7 +17,7 @@ karyoscope bin -i INPUT -o OUTPUT -b BIN_SIZE [OPTIONS]
 | Option | Description |
 | --- | --- |
 | `-i, --input FILE` | Input BED file (sorted by chrom then start). Use `-` for stdin. `.gz` supported. **[required]** |
-| `-o, --output FILE` | Output BED file. Use `-` for stdout. Output is gzipped iff the path ends in `.gz`. **[required]** |
+| `-o, --output FILE` | Output BED file. Use `-` for stdout. Output is bgzipped iff the path ends in `.gz`. **[required]** |
 | `-b, --bin-size INTEGER` | Bin size in base pairs (e.g. `1000000` for 1 Mb). **[required]** |
 | `--db TEXT` | Database id whose `hierarchy.tsv` defines the leaf-feature set. Default: the unique installed database if exactly one is installed and `--feature-set` is given. |
 | `--db-root DIRECTORY` | Override the database root directory (default: `$KARYOSCOPE_DB` or `~/.karyoscope/db/`). |

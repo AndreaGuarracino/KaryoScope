@@ -262,13 +262,13 @@ else.
 | `--flatten` | Pre-flatten overlapping BED regions to one label per base ([Priorities](#priorities)). |
 | `--flatten-order NAME=PATH` | Flatten order file for a feature set; implies `--flatten` for that set ([Priorities](#priorities)). Repeatable. |
 | `--variable-k` | Build a variable-k index, queryable at any k ≤ s ([Fixed-k and variable-k](#fixed-k-and-variable-k)). Not combinable with `--priority`. |
-| `--spec FILE` | Build-spec YAML (alternative to `--id`/`--sequence`/`--feature-set`). |
+| `--spec FILE` | Build-spec YAML; database-definition flags must be placed in this file instead. |
 | `--db-version TEXT` | Database version, semver (default `1.0.0`). |
 | `-s`, `--s INTEGER` | Maximum query length / k-mer size (default `31`). |
-| `-t`, `--threads INTEGER` | Threads for HKS construction (default `4`). |
-| `--mem-gigas INTEGER` | RAM budget (GB) for base-index construction (default `8`). |
-| `--external-memory DIRECTORY` | Build the base index in external-memory mode using this scratch dir (lower RAM, slower). |
-| `--forward-only` | Do not add reverse-complemented k-mers. |
+| `-t`, `--threads INTEGER` | Threads for HKS construction (default `4`). With `--spec`, overrides the spec's `build.threads`. |
+| `--mem-gigas INTEGER` | RAM budget (GB) for base-index construction (default `8`). With `--spec`, overrides the spec's `build.mem_gigas`. |
+| `--external-memory DIRECTORY` | Build the base index in external-memory mode using this scratch dir (lower RAM, slower). With `--spec`, overrides the spec's `build.external_memory`. |
+| `--forward-only` | Do not add reverse-complemented k-mers. With `--spec`, overrides the spec's `build.forward_only`. |
 | `--exclude TEXT` | Sequence name to exclude from the whole build (e.g. an organelle `ChrM`). Repeatable / comma-separated. See [Excluding sequences](#excluding-sequences). |
 | `--db-root DIRECTORY` | Override the database root (default: `$KARYOSCOPE_DB` or `~/.karyoscope/db/`). |
 | `--no-register` | Build only; do not record in `installed.json`. |
@@ -278,6 +278,17 @@ else.
 
 ## Build-spec file
 
+When using `--spec`, set database-definition options in the YAML: `--id`,
+`--sequence`, `--feature-set`, `--background`, `--exclude`, `--flatten-order`,
+`--hierarchy`, `--priority`, `--colors`, `--flatten`, `--variable-k`, `--s`, and
+`--db-version` cannot be supplied alongside it. Explicitly supplying a default
+value (such as `--s 31`) is also rejected. The four permitted build overrides
+are `--threads`, `--mem-gigas`, `--external-memory`, and `--forward-only`;
+omitting them preserves the YAML values, while explicitly supplying them
+replaces those values even if the supplied value equals the CLI default.
+Output and execution flags such as `--db-root`, `--force`, `--no-register`, and
+`--keep-intermediates` remain available with either input form.
+
 For databases with several feature sets, a YAML spec is clearer than flags and is checked in alongside the data:
 
 ```yaml
@@ -285,7 +296,7 @@ id: HKS_mygenome
 version: "1.0.0"
 sequence: /path/genome.fa.gz
 kmer: { s: 31 }
-build: { threads: 16, mem_gigas: 8, external_memory: /scratch/tmp }  # last two optional
+build: { threads: 16, mem_gigas: 8, external_memory: /scratch/tmp }  # last two optional; -t/--mem-gigas/--external-memory/--forward-only on the command line override these
 feature_sets:
   - name: repeat
     bed: /path/repeat.bed            # 4th col = feature label (a hierarchy leaf)
@@ -326,8 +337,11 @@ The **`chromosome` feature set declares the karyotype chromosomes** — its leav
 The simplest way is `--exclude` (or `exclude:` in the spec). Excluded sequences are dropped from **every** feature BED and from the gap-fill index, so no feature set covers them and they read as `none` everywhere — uniform across sets, and absent from the karyotype. They're still real sequence; they're just not karyotype chromosomes. (This is why, for example, human CHM13 databases leave out `chrM`.) Note that `--exclude` filters BEDs and the gap-fill index, not `hierarchy`/`colors`/`priority` files — so also drop the excluded names from those if you list them there.
 
 ```bash
-karyoscope build --spec build.yaml --exclude ChrM,ChrC
+karyoscope build --id HKS_mygenome --sequence genome.fa.gz \
+    --feature-set repeat=repeat.bed --exclude ChrM,ChrC
 ```
+
+With `--spec`, put it in the file instead: `exclude: [ChrM, ChrC]`.
 
 ## Examples
 

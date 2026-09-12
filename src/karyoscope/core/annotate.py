@@ -61,6 +61,7 @@ from karyoscope.core.io.kmc import (
     combined_bed_path,
     run_get_featureids,
 )
+from karyoscope.core.io.query_names import QUERY_NAMES_SUFFIX, write_query_names_sidecar
 from karyoscope.core.smooth import (
     HierarchyIndex,
     chunked_seq_reader,
@@ -120,11 +121,16 @@ class AnnotateResult:
         Empty when the user passed ``--no-smooth``.
     combined_intermediate
         Path to the C++ combined BED, or ``None`` if it was deleted.
+    query_names_sidecar
+        The rank -> record-name sidecar written for ``--query-names-sidecar``
+        (``<outdir>/<input>.query_names.txt.gz``), or ``None`` when it was not
+        requested.
     """
 
     presmoothed_paths: dict[str, Path] = field(default_factory=dict)
     smoothed_paths: dict[str, Path] = field(default_factory=dict)
     combined_intermediate: Path | None = None
+    query_names_sidecar: Path | None = None
 
     @property
     def all_output_paths(self) -> list[Path]:
@@ -178,6 +184,16 @@ def _derive_input_basename(input_path: Path) -> str:
         if name_lower.endswith(ext):
             return name[: -len(ext)]
     return input_path.stem
+
+
+def query_names_sidecar_path(output_dir: Path, input_path: Path) -> Path:
+    """Where ``--query-names-sidecar`` writes ``input_path``'s rank -> name mapping.
+
+    Named from the INPUT stem only, not the db-qualified prefix: the mapping
+    is a property of the input, so annotating one CRAM against two databases
+    must not write two identical sidecars.
+    """
+    return output_dir / f"{_derive_input_basename(input_path)}{QUERY_NAMES_SUFFIX}"
 
 
 #: Read-level input extensions. Used to pick the right smoothing
@@ -247,7 +263,10 @@ def _reject_query_names_for_reads(input_paths: list[Path], query_names: bool | N
         f"\n"
         f"Read-level output is identified by ordinal rank instead, and no "
         f"information is lost -- rank N is the Nth record of the query file. "
-        f"For a BAM/CRAM input that mapping is reproducible at any time with:\n"
+        f"Pass --query-names-sidecar to have annotate write that mapping next "
+        f"to the output as <input>.query_names.txt.gz (one name per line, line "
+        f"N+1 is rank N). For a BAM/CRAM input it is also reproducible at any "
+        f"time with:\n"
         f"  samtools fasta -F 0x900 -N --reference <ref> <input> | grep '^>'"
     )
 
@@ -455,7 +474,9 @@ def _require_hks_memory(
     )
 
 
-def _annotate_dependencies(*, index_type: str, input_path: Path, bgzip: bool) -> list[str]:
+def _annotate_dependencies(
+    *, index_type: str, input_path: Path, bgzip: bool, query_names_sidecar: bool = False
+) -> list[str]:
     """External tools this particular annotate run will need.
 
     Resolved from the database's backend, the input format, and the output
@@ -465,7 +486,10 @@ def _annotate_dependencies(*, index_type: str, input_path: Path, bgzip: bool) ->
     needed = ["hks"] if index_type == "hks" else ["get_featureIDs"]
     if input_path.suffix.lower() in (".bam", ".cram"):
         needed.append("samtools")
-    if bgzip:
+    # --query-names-sidecar needs no reader of its own -- a FASTA/FASTQ is
+    # scanned with awk (core.io.query_names) and an alignment's names come off
+    # the samtools decode already required above -- but the sidecar is bgzipped.
+    if bgzip or query_names_sidecar:
         needed.append("bgzip")
     return needed
 
@@ -1125,12 +1149,10 @@ def _run_hks_backend(
     # set, so a BAM/CRAM was decoded once PER SET -- six times over for a
     # six-set database, ~25 minutes each on a 56 GB CRAM. The context manager
     # also tees the query-name sidecar off that same decode when asked, instead
-    # of the caller decoding the input a second time to recover names.
+    # of the caller decoding the input a second time to recover names; a
+    # FASTA/FASTQ input, which hks reads directly, gets a scan pass instead.
     sidecars = (
-        # Named from the INPUT stem only, not the db-qualified prefix: the
-        # rank -> name mapping is a property of the input, so annotating one CRAM
-        # against two databases must not write two identical sidecars.
-        {p: output_dir / f"{_derive_input_basename(p)}.query_names.txt.gz" for p in input_paths}
+        {p: query_names_sidecar_path(output_dir, p) for p in input_paths}
         if query_names_sidecar
         else None
     )
@@ -1416,6 +1438,7 @@ def annotate(
     db_id_resolved, db_dir = resolve_database(db_root, db_id)
     manifest = validate_database_layout(db_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    sidecar_path = query_names_sidecar_path(output_dir, input_path) if query_names_sidecar else None
 
     # Resolve the query k-mer length. Defaults to the manifest's size; an
     # explicit override is only honoured on a variable-k HKS index (kmer.type
@@ -1442,7 +1465,12 @@ def annotate(
     # missing bgzip only bites at the very last step, and a full disk only
     # once gigabytes have been written.
     preflight.require(
-        _annotate_dependencies(index_type=manifest.index.type, input_path=input_path, bgzip=bgzip),
+        _annotate_dependencies(
+            index_type=manifest.index.type,
+            input_path=input_path,
+            bgzip=bgzip,
+            query_names_sidecar=query_names_sidecar,
+        ),
         context=f"annotate against {db_id_resolved}",
     )
     _cpus.warn_if_oversubscribed(threads, what=f"annotate against {db_id_resolved}")
@@ -1599,6 +1627,7 @@ def annotate(
         # reuse stays correct even if those args changed between runs.
         kmc_db_basename = db_dir / manifest.index.basename
         combined_bed = combined_bed_path(output_dir, prefix)
+        sidecar_written = False
 
         if not force and combined_bed_is_complete(combined_bed):
             logger.info(
@@ -1618,6 +1647,10 @@ def annotate(
                 threads,
             )
             t_kmc_start = time.perf_counter()
+            # An alignment's names are teed off the streaming decode inside
+            # run_get_featureids (one decode, not two); a FASTA/FASTQ, which
+            # get_featureIDs reads itself, gets a scan pass below.
+            is_alignment = input_path.suffix.lower() in (".bam", ".cram")
             combined_bed = run_get_featureids(
                 db_path=kmc_db_basename,
                 input_path=input_path,
@@ -1626,7 +1659,10 @@ def annotate(
                 prefix=prefix,
                 reference=reference,
                 capture=True,
+                query_names_sidecar=sidecar_path if is_alignment else None,
             )
+            if sidecar_path is not None and is_alignment:
+                sidecar_written = True
             if not combined_bed.is_file():
                 raise KaryoscopeError(
                     f"get_featureIDs did not produce expected output at {combined_bed}"
@@ -1642,6 +1678,20 @@ def annotate(
             # completion moment to count.
             progress.stage("k-mer query", time.perf_counter() - t_kmc_start)
         logger.debug("combined BED at %s", combined_bed)
+
+        if sidecar_path is not None and not sidecar_written:
+            # get_featureIDs reads a FASTA/FASTQ itself, so there is no
+            # decode to tee the names off and they take one pass of their
+            # own. (An alignment reaches here only when the combined BED was
+            # reused from a previous run and no decode happened; the pass is
+            # then a decode of its own.) After the query rather than before
+            # it, so a run that is going to die in get_featureIDs has not
+            # paid for the names first.
+            t_names_start = time.perf_counter()
+            write_query_names_sidecar(
+                input_path, sidecar_path, reference=reference, threads=threads, capture=True
+            )
+            progress.stage("query names", time.perf_counter() - t_names_start)
 
         # Run the smoothing pass. One pool initialised with every
         # requested feature set's state; each chunk is processed for all
@@ -1739,6 +1789,7 @@ def annotate(
         presmoothed_paths=presmoothed_paths,
         smoothed_paths=smoothed_paths,
         combined_intermediate=combined_kept,
+        query_names_sidecar=sidecar_path,
     )
 
 
@@ -1902,7 +1953,12 @@ def annotate_batch(
     # filesystem that only has room for one.
     for p in input_paths:
         preflight.require(
-            _annotate_dependencies(index_type=manifest.index.type, input_path=p, bgzip=bgzip),
+            _annotate_dependencies(
+                index_type=manifest.index.type,
+                input_path=p,
+                bgzip=bgzip,
+                query_names_sidecar=query_names_sidecar,
+            ),
             context=f"annotate against {db_id_resolved}",
         )
     _cpus.warn_if_oversubscribed(threads, what=f"annotate against {db_id_resolved}")
@@ -2008,7 +2064,12 @@ def annotate_batch(
                 if fs in smo:
                     smo[fs] = bgzip_file(smo[fs], threads=threads)
         results[p] = AnnotateResult(
-            presmoothed_paths=pre, smoothed_paths=smo, combined_intermediate=None
+            presmoothed_paths=pre,
+            smoothed_paths=smo,
+            combined_intermediate=None,
+            query_names_sidecar=(
+                query_names_sidecar_path(output_dir, p) if query_names_sidecar else None
+            ),
         )
 
     logger.info(

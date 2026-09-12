@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
     "output_path",
     type=click.Path(dir_okay=False, path_type=Path),
     required=True,
-    help="Output BED file. Use '-' for stdout. Output is gzipped iff the path ends in .gz.",
+    help="Output BED file. Use '-' for stdout. Output is bgzipped iff the path ends in .gz.",
 )
 @click.option(
     "--bin-size",
@@ -158,7 +158,7 @@ def cmd(
             leaf_set=leaf_set,
             threads=threads,
         )
-    except BinError as e:
+    except (BinError, KaryoscopeError) as e:
         raise click.ClickException(str(e)) from e
 
     if str(output_path) != "-":

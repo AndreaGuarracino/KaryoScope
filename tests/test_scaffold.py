@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,8 @@ from karyoscope.core.scaffold import (
 from .conftest import read_fasta_records
 
 # --- pure helpers ---------------------------------------------------
+
+requires_bgzip = pytest.mark.skipif(shutil.which("bgzip") is None, reason="bgzip not on PATH")
 
 
 class TestGetSimpleRegion:
@@ -699,6 +702,7 @@ class TestRewriteFasta:
         out = read_fasta_records(dst)
         assert list(out.keys()) == ["chr1_h1_ctgA"]
 
+    @requires_bgzip
     def test_gzip_input_and_output(self, tmp_path: Path) -> None:
         import gzip as _gz
 

@@ -34,6 +34,7 @@ from karyoscope.core.external import (
     run_tool,
 )
 from karyoscope.core.io.features import NOVEL_NAME
+from karyoscope.core.io.query_names import names_sink, write_query_names_sidecar
 from karyoscope.exceptions import KaryoscopeError
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,26 @@ HKS_OOM_HINT = (
     "  * On a login node: move to a compute node.\n"
     "  * Check the database's index size on disk -- `du -sh <db>/index` is a "
     "good lower bound for what one lookup needs resident.\n"
+)
+
+
+#: Advice for an OOM-killed ``hks build-base``. The lookup/smooth figures above
+#: are wrong by an order of magnitude here: construction sorts every k-mer of
+#: the input in RAM, so a human genome peaks at ~70-80 GB for k <= 31 and
+#: ~150 GB above k = 32 whatever ``--mem-gigas`` says (that flag is only the
+#: SBWT budget). The lever is ``--external-memory``, which brings the same
+#: build to ~14-20 GB (measured, docs/commands/build.md).
+HKS_BUILD_OOM_HINT = (
+    "hks build-base sorts every k-mer of the input in RAM in its default mode: a "
+    "human genome peaks at ~70-80 GB for k <= 31 and ~150 GB for k > 32, whatever "
+    "--mem-gigas says (that is only the SBWT construction budget, not a cap).\n"
+    "Recommended fixes:\n"
+    "  * Pass --external-memory DIR (or `build: {external_memory: DIR}` in the "
+    "spec): the same index, ~14-20 GB peak for a human genome, ~1.4x the wall "
+    "time. DIR needs room for the k-mer intermediates.\n"
+    "  * Otherwise request ~1.5x the figures above for the in-memory algorithm "
+    "(e.g. --mem=128G on SLURM for a human genome at k <= 31).\n"
+    "  * See docs/commands/build.md, 'Resource requirements'.\n"
 )
 
 
@@ -249,10 +270,14 @@ def materialised_queries(
     result across every feature set.
 
     ``query_names_sidecar`` maps an input to a path that receives its record
-    names, one per line, in the order hks will assign ranks. That is teed off
-    THIS decode rather than requiring the caller to decode the alignment a second
-    time purely to recover them (another ~25 minutes and a full re-read on the
-    largest sample).
+    names, one per line, in the order hks will assign ranks. For an alignment
+    that is teed off THIS decode rather than requiring the caller to decode it
+    a second time purely to recover them (another ~25 minutes and a full
+    re-read on the largest sample). FASTA/FASTQ inputs are read by ``hks``
+    directly, so there is no decode to tee off and the names take a streaming
+    scan pass of their own (:func:`write_query_names_sidecar`) -- one extra
+    read of the input, cheap next to a lookup that reads it once per feature
+    set.
 
     Temp FASTAs are created in ``dest_dir`` (pass the run's output
     directory: the FASTA is input-sized, and the output's filesystem is the
@@ -268,6 +293,9 @@ def materialised_queries(
             suffix = input_path.suffix.lower()
             if suffix not in _ALIGNMENT_EXTENSIONS:
                 query_paths[input_path] = input_path
+                sidecar = (query_names_sidecar or {}).get(input_path)
+                if sidecar is not None:
+                    write_query_names_sidecar(input_path, sidecar, threads=threads, capture=capture)
                 continue
             fmt = suffix.lstrip(".").upper()
             if suffix == ".cram" and reference is None:
@@ -320,15 +348,10 @@ def materialised_queries(
                 # finish: a full disk under the sidecar would have reported
                 # success, and gzip could still be flushing when the run moved
                 # on. Every stage of a linear pipeline is covered by pipefail
-                # and complete when bash returns. awk rather than grep so an
-                # input with zero records is empty output, not exit code 1.
+                # and complete when bash returns. The name-extracting tail is
+                # shared with the scan pass so both write one file format.
                 sidecar.parent.mkdir(parents=True, exist_ok=True)
-                pipeline = (
-                    f"{shlex.join(cmd)} "
-                    f"| tee {shlex.quote(str(tmp_fasta))} "
-                    "| awk '/^>/ { print substr($1, 2) }' "
-                    f"| gzip > {shlex.quote(str(sidecar))}"
-                )
+                pipeline = f"{shlex.join(cmd)} | tee {shlex.quote(str(tmp_fasta))} | {names_sink(sidecar, threads)}"
                 logger.debug("teeing query names to %s", sidecar)
                 result = subprocess.run(
                     ["bash", "-o", "pipefail", "-c", pipeline],
@@ -623,7 +646,7 @@ def run_hks_build_base(
         cmd.append("--forward-only")
 
     logger.debug("running: %s", " ".join(cmd))
-    run_tool(cmd, capture=capture, oom_hint=HKS_OOM_HINT)
+    run_tool(cmd, capture=capture, oom_hint=HKS_BUILD_OOM_HINT)
     return output_path
 
 

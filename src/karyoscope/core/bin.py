@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import IO
 
 from karyoscope import cpus as _cpus
+from karyoscope.core.io.bgzip import open_bgzip_writer
 from karyoscope.core.io.features import NOVEL_NAME
 from karyoscope.core.io.hierarchy import Hierarchy
 from karyoscope.core.smooth import chunked_seq_reader
@@ -334,17 +335,21 @@ def _open_in(path: Path) -> IO[str]:
 
 
 def _open_out(path: Path, *, gzip_out: bool) -> IO[str]:
-    """Open ``path`` for text writing.
+    """Open ``path`` for text writing, streaming through ``bgzip`` if ``gzip_out``.
 
     Returns ``sys.stdout`` when ``path`` is ``-``. Same close-semantics
-    caveat as :func:`_open_in`.
+    caveat as :func:`_open_in`. The compressor gets one thread: ``--threads``
+    is the worker pool's budget, and the binned output is a small fraction
+    of the input (a human genome at 100 kb bins is tens of thousands of
+    lines), so parallel compression would add contention and buffers for no
+    measurable gain.
     """
     if str(path) == "-":
         import sys
 
         return sys.stdout
     if gzip_out:
-        return gzip.open(path, "wt")
+        return open_bgzip_writer(path)
     return path.open("w")
 
 

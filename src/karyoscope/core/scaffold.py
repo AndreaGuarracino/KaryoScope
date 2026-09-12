@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import IO
 
 from karyoscope.core.io.agp import AgpComponent, AgpGap, AgpObject
+from karyoscope.core.io.bgzip import open_bgzip_writer
 from karyoscope.core.io.fasta import reverse_complement
 from karyoscope.core.io.scaffold_map import MapRow, read_map
 from karyoscope.core.io.telo import TeloFlags
@@ -768,8 +769,9 @@ def _open_bed_in(path: Path) -> IO[str]:
 
 
 def _open_bed_out(path: Path, *, gzip_out: bool) -> IO[str]:
+    """Open ``path`` for text writing, streaming through ``bgzip`` if ``gzip_out``."""
     if gzip_out:
-        return gzip.open(path, "wt")
+        return open_bgzip_writer(path)
     return path.open("w")
 
 

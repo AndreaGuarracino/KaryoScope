@@ -63,7 +63,7 @@ A pre-built database for the human genome is distributed alongside the tool, der
 | Tool | Required for | Version used in testing |
 |---|---|---|
 | C++20 compiler | building the bundled `get_featureIDs` helper | GCC ≥ 11 or Clang ≥ 13 (Apple Clang) |
-| `bgzip`, `tabix` (htslib) | compressing and indexing BED output | 1.22.1 |
+| `bgzip`, `tabix` (htslib) | compressing and indexing output: every `.gz` KaryoScope writes is bgzip | 1.22.1 |
 | seqtk | telomere detection (`scaffold`, `centromeres`, `karyotype`) | 1.5 |
 | [`hks`](https://github.com/jnalanko/HKS) | building databases with `karyoscope build`, and annotating against HKS-backend databases (e.g. `HKS_human_CHM13_v2`) | **0.4.0 or newer** |
 | KMC | building a *KMC-backend* database (legacy — `karyoscope build` produces HKS databases). Not needed to *use* a pre-built KMC database; the bundled `get_featureIDs` helper queries its index directly | 3.2.x (vendored API 3.2.4) |
