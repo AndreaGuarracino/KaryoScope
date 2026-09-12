@@ -10,6 +10,7 @@ import pytest
 from karyoscope.core.io.scaffold_map import MapRow
 from karyoscope.core.io.telo import TeloFlags
 from karyoscope.core.scaffold import (
+    GRAMMARS,
     ContigInput,
     Interval,
     _to_agp_objects,
@@ -91,6 +92,26 @@ class TestAssignMainChromosome:
         bins: list[Interval] = [(0, 1000, "novel"), (1000, 2000, "categorized")]
         assert assign_main_chromosome(bins, {"chr1"}) is None
 
+    def test_mass_overrides_the_binned_proxy(self) -> None:
+        # GM03786 haplotype2-0000063, a 2.48 Mb female-X contig of pseudo-autosomal
+        # + X-transposed sequence. The binned view says chrY because bin 1 fell to
+        # chrY by 3 kb in a million and the trailing runt bin -- which chrX won --
+        # was folded into that chrY row, donating its width. True coverage is
+        # chrX 629,147 bp vs chrY 538,023 bp.
+        bins: list[Interval] = [(0, 1_000_000, "chrX"), (1_000_000, 2_477_740, "chrY")]
+        leaves = {"chrX", "chrY"}
+        assert assign_main_chromosome(bins, leaves) == "chrY"  # the old, wrong answer
+        mass = {"chrX": 629_147, "chrY": 538_023, "sex": 1_198_259}
+        assert assign_main_chromosome(bins, leaves, mass=mass) == "chrX"
+
+    def test_mass_ignores_internal_nodes_and_empty_falls_back(self) -> None:
+        bins: list[Interval] = [(0, 1000, "chr2")]
+        # "sex"/"autosome" are internal nodes: huge mass, no vote.
+        mass = {"autosome": 10_000, "chr1": 400, "chr2": 300}
+        assert assign_main_chromosome(bins, {"chr1", "chr2"}, mass=mass) == "chr1"
+        # Mass with no leaf at all -> None, not a silent fall back to the bins.
+        assert assign_main_chromosome(bins, {"chr1", "chr2"}, mass={"autosome": 10}) is None
+
 
 class TestFindLargestContiguousRegion:
     def test_full_match(self) -> None:
@@ -120,6 +141,46 @@ class TestFindLargestContiguousRegion:
     def test_no_main_returns_full_extent(self) -> None:
         bins = [(0, 1000, "novel"), (1000, 2000, "categorized")]
         assert find_largest_contiguous_region(bins, None, {"chr1"}) == (0, 2000)
+
+    def test_cytoband_grammar_matches_bands_to_the_assigned_chromosome(self) -> None:
+        # Regression (PR #52 review): compatibility compared the raw label with the
+        # chromosome, so under the cytoband grammar "1p11" != "chr1" and the only
+        # compatible bins were the novel gap -- the orientation vote then had zero
+        # arm evidence. Bands 0-210 with a novel gap at 100-110 must select the whole
+        # span, not (100, 110).
+        bins = [
+            (0, 50, "1p11"),
+            (50, 100, "1p11.1"),
+            (100, 110, "novel"),
+            (110, 160, "1q11"),
+            (160, 210, "1q12"),
+        ]
+        leaves = {"1p11", "1p11.1", "1q11", "1q12", "2p11"}
+        grammar = GRAMMARS["cytoband"]
+        assert find_largest_contiguous_region(bins, "chr1", leaves, grammar=grammar) == (0, 210)
+        # Another chromosome's band still breaks the run; an internal node does not.
+        bins2 = [(0, 100, "1p11"), (100, 200, "2p11"), (200, 500, "1q11"), (500, 600, "1q1")]
+        assert find_largest_contiguous_region(bins2, "chr1", leaves, grammar=grammar) == (200, 600)
+        # The plain grammar is unchanged: raw labels are the chromosome.
+        plain = [(0, 1000, "chr1"), (1000, 2000, "novel"), (2000, 3000, "chr1")]
+        assert find_largest_contiguous_region(plain, "chr1", {"chr1", "chr2"}) == (0, 3000)
+
+
+class TestLabelGrammar:
+    def test_plain_is_identity(self) -> None:
+        g = GRAMMARS["plain"]
+        assert g.chromosome_of("chr7") == "chr7" and g.chromosome_of("novel") == "novel"
+        assert g.simple_region("p_arm_specific") == "p_arm"
+
+    def test_cytoband_reads_chromosome_and_arm_off_the_band(self) -> None:
+        g = GRAMMARS["cytoband"]
+        assert g.chromosome_of("Yq12") == "chrY" and g.simple_region("Yq12") == "q_arm"
+        assert g.chromosome_of("13p11.2") == "chr13" and g.simple_region("13p11.2") == "p_arm"
+        assert g.chromosome_of("1q1") == "chr1"  # internal band node still names its chromosome
+        # Non-band labels carry no chromosome and fall back to the region categories.
+        for label in ("novel", "categorized", "autosome"):
+            assert g.chromosome_of(label) is None
+        assert g.simple_region("novel") == "novel"
 
 
 class TestHalfRegionTotals:

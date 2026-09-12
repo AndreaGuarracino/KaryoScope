@@ -111,6 +111,22 @@ logger = logging.getLogger(__name__)
     help="Drop contigs shorter than this that have no telomere.",
 )
 @click.option(
+    "--label-grammar",
+    type=click.Choice(["plain", "cytoband"]),
+    default="plain",
+    show_default=True,
+    help="How to read chromosome identity and arm out of a feature label. "
+    "'plain' (default, unchanged behaviour) takes the chromosome set's label as "
+    "the chromosome and asks get_simple_region for the arm. 'cytoband' is "
+    "EXPERIMENTAL: it parses both off a cytoband label (Yq12 -> chrY, q arm) so "
+    "that satellite-rich arms such as Yq12 still count as arm material for the "
+    "orientation vote (the region set routes every satellite class into its "
+    "centromere catch-all). It is not yet validated against a verified flip list, "
+    "and cytoband resolves acrocentric short arms worse than the region set "
+    "(30-48% arm-labelled), so flips there may get worse. Point --db at a "
+    "cytoband database to use it.",
+)
+@click.option(
     "--telo-motif",
     default=None,
     help="Telomere repeat motif for `seqtk telo` (its -m). Default: seqtk's CCCTAA "
@@ -205,6 +221,7 @@ def cmd(
     feature_sets_arg: tuple[str, ...],
     bin_size: int,
     min_scaffold_length: int,
+    label_grammar: str,
     telo_motif: str | None,
     acrocentrics_raw: tuple[str, ...],
     mode: str,
@@ -320,6 +337,7 @@ def cmd(
             mode=mode_normalised,
             bin_size=bin_size,
             min_scaffold_length=min_scaffold_length,
+            label_grammar=label_grammar,
             telo_motif=telo_motif,
             acrocentrics=acrocentrics,
             split_haps_regex=split_haps_regex,

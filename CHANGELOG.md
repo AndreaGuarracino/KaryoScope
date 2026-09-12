@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A contig's chromosome is assigned by annotated bp, not by bin widths.**
+  `assign_main_chromosome` summed the widths of the winner-take-all 1 Mb bins a
+  label won, so a bin won by a hair cast a full-width vote and a trailing runt bin
+  was folded into its neighbour's row. GM03786 `haplotype2-0000063` (2.48 Mb of
+  pseudo-autosomal + X-transposed sequence; true coverage chrX 629 kb vs chrY
+  538 kb) was laid out as chrY and produced `del(Y)(p11.1q12)` on an XX sample.
+  The vote now reads per-label bp from the unbinned chromosome BED (streamed, so
+  memory is O(sequences × labels)); the bin-width path remains as a fallback for
+  callers that have only the binned view. Over 972 HPRC contigs 2.26 % change
+  assignment, almost all small acrocentric contigs swapping among acrocentrics.
+
 - **`--query-names-sidecar` no longer does nothing, silently, outside its
   original case.** Introduced in 2.3.0 for BAM/CRAM on the HKS backend, the
   flag was accepted for every input and backend but only acted there: a
@@ -92,6 +103,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before rendering, raising instead of drawing an incomplete plot.
 
 ### Added
+
+- **`karyoscope scaffold --label-grammar {plain,cytoband}` (experimental).** A
+  pluggable *label grammar* says how the scaffolder reads chromosome identity and
+  arm out of a feature label. `plain` is the default and byte-identical to the
+  previous behaviour. `cytoband` parses both off a cytoband label (`Yq12` → chrY,
+  q arm), so satellite-rich arms still count as arm material for the orientation
+  vote: the region set routes every satellite class into its centromere
+  catch-all, leaving chrY only ~35 % arm-labelled (≥ 10 Mb chrY contigs were
+  reverse-complemented 46.5 % of the time vs 0.2 % for chrX) against ~98 % under
+  cytoband. Under it one cytoband set may serve both manifest roles, and the
+  chromosome vote aggregates sub-bands up to the chromosome. **Not yet validated**
+  against a verified flip list, and expected to be worse on acrocentric short arms
+  (30–48 % arm-labelled), so it is opt-in; the likely end state is per-chromosome
+  grammar selection.
 
 - **PanSN contig names (`<sample>#<hap>#<contig>`) are recognised** when
   splitting a single combined input whose contigs match no other haplotype

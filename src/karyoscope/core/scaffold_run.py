@@ -61,6 +61,7 @@ from karyoscope.core.scaffold import (
     DEFAULT_HUMAN_ACROCENTRICS,
     DEFAULT_MIN_SCAFFOLD_LENGTH,
     DEFAULT_SCAFFOLD_GAP_SIZE,
+    GRAMMARS,
     ContigInput,
     _to_agp_objects,
     classify_and_orient,
@@ -178,13 +179,36 @@ class ScaffoldResult:
 # --- helpers --------------------------------------------------------
 
 
-def _resolve_roles(manifest_roles: dict[str, str], available: list[str]) -> tuple[str, str]:
+def _resolve_roles(
+    manifest_roles: dict[str, str],
+    available: list[str],
+    *,
+    label_grammar: str = "plain",
+) -> tuple[str, str]:
     """Pick the chromosome- and region-assignment feature sets.
 
     Falls back to literal names with a warning when the manifest omits
     them. Errors when the resolved set is not declared in
     ``available``.
+
+    Under the ``cytoband`` grammar one feature set serves BOTH roles: a cytoband
+    label carries the chromosome and the arm at once (``Yq12`` -> chrY, q), which
+    is the whole reason for that grammar. A cytoband-only database therefore has
+    no ``chromosome``/``region`` sets to fall back to, so resolve both roles to
+    the cytoband set unless the manifest says otherwise.
     """
+    if label_grammar == "cytoband":
+        cyto = manifest_roles.get("chromosome_assignment") or next(
+            (fs for fs in available if "cytoband" in fs), None
+        )
+        if cyto is None:
+            raise ScaffoldError(
+                "--label-grammar cytoband needs a cytoband feature set; this "
+                f"database declares {available!r}. Point --db at a cytoband database."
+            )
+        region = manifest_roles.get("region_assignment") or cyto
+        return cyto, region
+
     chrom_set = manifest_roles.get("chromosome_assignment")
     if chrom_set is None:
         chrom_set = "chromosome"
@@ -434,6 +458,32 @@ def _load_binned_bed(path: Path) -> dict[str, list[tuple[int, int, str]]]:
     return out
 
 
+def _load_label_mass(path: Path) -> dict[str, dict[str, int]]:
+    """Total annotated bp per label, per sequence, from an UNBINNED BED.
+
+    Feeds the chromosome assignment, which must not be decided off the binned
+    view -- see :func:`karyoscope.core.scaffold.assign_main_chromosome`. Only
+    totals are kept, so memory is O(sequences x labels) regardless of how many
+    records the BED holds; the smoothed chromosome BED streams in a few seconds.
+    """
+    import gzip
+
+    opener = gzip.open if path.suffix == ".gz" else open
+    out: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    with opener(path, "rt") as h:
+        for raw in h:
+            parts = raw.rstrip("\n").split("\t")
+            if len(parts) < 4:
+                continue
+            try:
+                span = int(parts[2]) - int(parts[1])
+            except ValueError:
+                continue
+            if span > 0:
+                out[parts[0]][parts[3]] += span
+    return {seq: dict(labels) for seq, labels in out.items()}
+
+
 #: Filename tag distinguishing combined-chromosome outputs from the
 #: per-contig scaffolded outputs, so a user can run with and without
 #: ``--combine-chromosomes`` in the same directory without collisions.
@@ -564,6 +614,7 @@ def scaffold_run(
     output_dir: Path | None = None,
     write_scaffolded_beds: bool = True,
     annotation_variant: str = "smoothed",
+    label_grammar: str = "plain",
     progress: Progress = SILENT,
 ) -> dict[str, ScaffoldResult]:
     """Run the full ``karyoscope scaffold`` pipeline.
@@ -637,7 +688,9 @@ def scaffold_run(
     manifest = validate_database_layout(db_dir)
     available = list(manifest.feature_sets)
 
-    chromosome_fs, region_fs = _resolve_roles(manifest.roles, available)
+    chromosome_fs, region_fs = _resolve_roles(
+        manifest.roles, available, label_grammar=label_grammar
+    )
     if mode == "fasta":
         # FASTA-only mode never writes per-feature-set scaffolded BEDs,
         # so there's no point requesting them from annotate. The role
@@ -763,6 +816,14 @@ def scaffold_run(
         chrom_bins = _load_binned_bed(
             _binned_bed_path(r.out_dir, r.stem, db_id_resolved, chromosome_fs, bin_size)
         )
+        # True per-label bp for the chromosome assignment. The binned view above
+        # cannot decide it: bins are winner-take-all and a runt bin is folded into
+        # its neighbour, so bin widths can rank a minority chromosome first.
+        chrom_mass = _load_label_mass(
+            _annotation_bed_path(
+                r.out_dir, r.stem, db_id_resolved, chromosome_fs, variant=annotation_variant
+            )
+        )
         region_bins = _load_binned_bed(
             _binned_bed_path(r.out_dir, r.stem, db_id_resolved, region_fs, bin_size)
         )
@@ -791,6 +852,7 @@ def scaffold_run(
                 chromosome_bins=sorted(chrom_bins.get(name, [])),
                 region_bins=sorted(region_bins.get(name, [])),
                 telo=telo_flags.get(name, TeloFlags(False, False)),
+                chromosome_mass=chrom_mass.get(name),
             )
             all_contigs.append(ci)
             contigs_per_input[r.spec.path.name].append(ci)
@@ -807,6 +869,7 @@ def scaffold_run(
         chromosome_leaves=chromosome_leaves,
         acrocentrics=acros_set,
         min_scaffold_length=min_scaffold_length,
+        grammar=GRAMMARS[label_grammar],
     )
     logger.info(
         "classified %d scaffold row(s) in %.1fs",
