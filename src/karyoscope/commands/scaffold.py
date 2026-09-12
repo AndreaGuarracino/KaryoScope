@@ -127,6 +127,14 @@ logger = logging.getLogger(__name__)
     "cytoband database to use it.",
 )
 @click.option(
+    "--order-bed",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Cytoband BED of the same contigs (e.g. the cytoband smoothed annotation). "
+    "Used only to orient a contig the arm/telomere vote cannot decide, such as a "
+    "contig that lies inside one arm, by the order of its bands.",
+)
+@click.option(
     "--telo-motif",
     default=None,
     help="Telomere repeat motif for `seqtk telo` (its -m). Default: seqtk's CCCTAA "
@@ -222,6 +230,7 @@ def cmd(
     bin_size: int,
     min_scaffold_length: int,
     label_grammar: str,
+    order_bed: Path | None,
     telo_motif: str | None,
     acrocentrics_raw: tuple[str, ...],
     mode: str,
@@ -338,6 +347,7 @@ def cmd(
             bin_size=bin_size,
             min_scaffold_length=min_scaffold_length,
             label_grammar=label_grammar,
+            order_bed=order_bed,
             telo_motif=telo_motif,
             acrocentrics=acrocentrics,
             split_haps_regex=split_haps_regex,

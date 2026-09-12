@@ -1089,3 +1089,15 @@ class TestToAgpObjects:
         agp = _to_agp_objects(objs, [("tiny", 2)])
         assert [o.name for o in agp] == ["chr1_hap1", "tiny"]
         assert agp[1].parts[0].length == 2
+
+
+def test_band_order_decides_a_within_arm_contig():
+    from karyoscope.core.scaffold import band_order_says_flip
+
+    forward = [(0, 10, "2q11.2"), (10, 20, "2q21.1"), (20, 30, "2q33.1"), (30, 40, "2q37.3")]
+    assert band_order_says_flip(forward) is False
+    assert (
+        band_order_says_flip(list(reversed([(40 - e, 40 - s, n) for s, e, n in forward]))) is True
+    )
+    assert band_order_says_flip([(0, 10, "q_arm"), (10, 20, "q_arm")]) is None
+    assert band_order_says_flip(None) is None

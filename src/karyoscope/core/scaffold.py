@@ -97,6 +97,10 @@ class ContigInput:
     #: Drives the chromosome assignment; see :func:`assign_main_chromosome` for
     #: why the binned rows are not a safe substitute. ``None`` -> fall back to them.
     chromosome_mass: dict[str, int] | None = None
+    #: Cytoband intervals of the contig (``--order-bed``), used only to orient a
+    #: contig the arm/telomere ladder cannot decide (e.g. one that lies inside
+    #: a single arm). ``None`` -> ladder only.
+    order_bins: list[Interval] | None = None
 
 
 # --- pure helpers ---------------------------------------------------
@@ -405,6 +409,41 @@ def scaffold_region_majority(
     return max(counts, key=lambda k: counts[k])
 
 
+def band_order_says_flip(order_bins: list[Interval] | None) -> bool | None:
+    """Orient by cytoband order along the contig; ``None`` if undecidable.
+
+    Band position runs p-ter -> q-ter as -p-number ... +q-number
+    (``2p25.3`` -> -25.3, ``2q37.3`` -> +37.3), so along a correctly oriented
+    contig the length-weighted position of the second half exceeds that of the
+    first half. Ties and non-cytoband labels leave the decision to the caller.
+    """
+    if not order_bins:
+        return None
+    pos: list[tuple[float, float, int]] = []
+    for start, stop, name in order_bins:
+        _, arm = parse_cytoband_label(name)
+        if arm is None:
+            continue
+        num = re.sub(r"^[0-9XY]+[pq]", "", name)
+        try:
+            value = float(num)
+        except ValueError:
+            continue
+        pos.append(((start + stop) / 2, -value if arm == "p" else value, stop - start))
+    if len(pos) < 2:
+        return None
+    mid = (min(m for m, _, _ in pos) + max(m for m, _, _ in pos)) / 2
+    first = [(v, w) for m, v, w in pos if m < mid]
+    second = [(v, w) for m, v, w in pos if m >= mid]
+    if not first or not second:
+        return None
+    def mean(part: list[tuple[float, int]]) -> float:
+        return sum(v * w for v, w in part) / sum(w for _, w in part)
+
+    a, b = mean(first), mean(second)
+    return None if a == b else a > b
+
+
 def need_to_flip(
     region_bins: list[Interval],
     region_half_totals: dict[str, list[int]],
@@ -415,6 +454,7 @@ def need_to_flip(
     telo: TeloFlags,
     is_acrocentric: bool,
     grammar: LabelGrammar = DEFAULT_GRAMMAR,
+    order_bins: list[Interval] | None = None,
 ) -> bool:
     """Decide whether the contig is reversed (q-then-p) and should be flipped.
 
@@ -507,9 +547,14 @@ def need_to_flip(
         return False
 
     # No contiguous-region-touching telomere on either end: use
-    # combined p/q-score logic.
+    # combined p/q-score logic; a tie (typically a contig inside one
+    # arm, where both halves are the same arm) falls back to band order.
     p_score = first_half_p - second_half_p
     q_score = second_half_q - first_half_q
+    if p_score + q_score == 0:
+        by_order = band_order_says_flip(order_bins)
+        if by_order is not None:
+            return by_order
     return (p_score + q_score) < 0
 
 
@@ -627,6 +672,7 @@ def _orient(
         telo=contig.telo,
         is_acrocentric=main_chromosome in acrocentrics,
         grammar=grammar,
+        order_bins=contig.order_bins,
     )
 
     if flipped:

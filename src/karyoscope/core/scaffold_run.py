@@ -615,6 +615,7 @@ def scaffold_run(
     write_scaffolded_beds: bool = True,
     annotation_variant: str = "smoothed",
     label_grammar: str = "plain",
+    order_bed: Path | None = None,
     progress: Progress = SILENT,
 ) -> dict[str, ScaffoldResult]:
     """Run the full ``karyoscope scaffold`` pipeline.
@@ -794,6 +795,7 @@ def scaffold_run(
     all_contigs: list[ContigInput] = []
     contigs_per_input: dict[str, list[ContigInput]] = defaultdict(list)
     lengths_per_input: dict[str, dict[str, int]] = {}
+    order_bins = _load_binned_bed(order_bed) if order_bed is not None else None
     for r in resolved:
         if combine_chromosomes:
             # The combined-output writer needs every contig's true
@@ -853,6 +855,7 @@ def scaffold_run(
                 region_bins=sorted(region_bins.get(name, [])),
                 telo=telo_flags.get(name, TeloFlags(False, False)),
                 chromosome_mass=chrom_mass.get(name),
+                order_bins=order_bins.get(name) if order_bins is not None else None,
             )
             all_contigs.append(ci)
             contigs_per_input[r.spec.path.name].append(ci)
