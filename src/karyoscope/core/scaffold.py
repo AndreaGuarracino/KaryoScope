@@ -409,38 +409,47 @@ def scaffold_region_majority(
     return max(counts, key=lambda k: counts[k])
 
 
+def _band_positions(
+    bins: list[Interval] | None, chrom: str | None = None
+) -> list[tuple[float, float, int]]:
+    """``(midpoint, band position, length)`` per cytoband bin; p-ter -> q-ter as -p ... +q.
+
+    ``2p25.3`` -> -25.3, ``2q37.3`` -> +37.3. With ``chrom`` (``chr2`` or ``2``) only
+    that chromosome's bands count, so a derivative's foreign segment is ignored.
+    """
+    out: list[tuple[float, float, int]] = []
+    for start, stop, name in bins or []:
+        token, arm = parse_cytoband_label(name)
+        if arm is None or (chrom is not None and token != chrom.removeprefix("chr")):
+            continue
+        try:
+            value = float(re.sub(r"^[0-9XY]+[pq]", "", name))
+        except ValueError:
+            continue
+        out.append(((start + stop) / 2, -value if arm == "p" else value, stop - start))
+    return out
+
+
+def _mean_position(pos: list[tuple[float, float, int]]) -> float:
+    return sum(v * w for _, v, w in pos) / sum(w for _, _, w in pos)
+
+
 def band_order_says_flip(order_bins: list[Interval] | None) -> bool | None:
     """Orient by cytoband order along the contig; ``None`` if undecidable.
 
-    Band position runs p-ter -> q-ter as -p-number ... +q-number
-    (``2p25.3`` -> -25.3, ``2q37.3`` -> +37.3), so along a correctly oriented
-    contig the length-weighted position of the second half exceeds that of the
-    first half. Ties and non-cytoband labels leave the decision to the caller.
+    Along a correctly oriented contig the length-weighted band position of the
+    second half exceeds that of the first half. Ties and non-cytoband labels
+    leave the decision to the caller.
     """
-    if not order_bins:
-        return None
-    pos: list[tuple[float, float, int]] = []
-    for start, stop, name in order_bins:
-        _, arm = parse_cytoband_label(name)
-        if arm is None:
-            continue
-        num = re.sub(r"^[0-9XY]+[pq]", "", name)
-        try:
-            value = float(num)
-        except ValueError:
-            continue
-        pos.append(((start + stop) / 2, -value if arm == "p" else value, stop - start))
+    pos = _band_positions(order_bins)
     if len(pos) < 2:
         return None
     mid = (min(m for m, _, _ in pos) + max(m for m, _, _ in pos)) / 2
-    first = [(v, w) for m, v, w in pos if m < mid]
-    second = [(v, w) for m, v, w in pos if m >= mid]
+    first = [x for x in pos if x[0] < mid]
+    second = [x for x in pos if x[0] >= mid]
     if not first or not second:
         return None
-    def mean(part: list[tuple[float, int]]) -> float:
-        return sum(v * w for v, w in part) / sum(w for _, w in part)
-
-    a, b = mean(first), mean(second)
+    a, b = _mean_position(first), _mean_position(second)
     return None if a == b else a > b
 
 
@@ -755,15 +764,17 @@ def classify_and_orient(
             continue
         cells[(chrom, c.input_name)].append(i)
 
-    # Emit rows in chromosome order, then hap order, then category x length within each cell.
+    # Emit rows in chromosome order, then hap order, then category x length within each cell;
+    # with --order-bed, by band position along the chromosome, so adjacent contigs of a
+    # scaffold are neighbours in the genome and not read as a cross-contig inversion.
     rows: list[MapRow] = []
     for chrom, hap in sorted(cells.keys(), key=lambda k: (chromosome_sort_key(k[0]), k[1])):
         cell_indices = cells[(chrom, hap)]
         oriented = [
             _orient(kept[i], chrom, chromosome_leaves, acrocentrics, grammar) for i in cell_indices
         ]
-        # Build sort keys per oriented contig: (category, -length, original_name).
-        decorated: list[tuple[tuple[int, int, str], _OrientedContig]] = []
+        # Build sort keys per oriented contig: (band position) or (category, -length), then name.
+        decorated: list[tuple[tuple, _OrientedContig]] = []
         for o in oriented:
             p_total = sum(o.half_totals["p_arm"])
             q_total = sum(o.half_totals["q_arm"])
@@ -775,7 +786,9 @@ def classify_and_orient(
                 has_start_tel=o.oriented_telo.start,
                 has_stop_tel=o.oriented_telo.stop,
             )
-            decorated.append(((cat, -o.contig.length, o.contig.contig_name), o))
+            pos = _band_positions(o.contig.order_bins, o.chromosome)
+            key = (0, _mean_position(pos), "") if pos else (1, cat, -o.contig.length)
+            decorated.append(((*key, o.contig.contig_name), o))
         decorated.sort(key=lambda t: t[0])
 
         for _, o in decorated:

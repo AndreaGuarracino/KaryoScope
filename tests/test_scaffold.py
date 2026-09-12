@@ -1101,3 +1101,14 @@ def test_band_order_decides_a_within_arm_contig():
     )
     assert band_order_says_flip([(0, 10, "q_arm"), (10, 20, "q_arm")]) is None
     assert band_order_says_flip(None) is None
+
+
+def test_band_positions_order_contigs_along_the_chromosome():
+    from karyoscope.core.scaffold import _band_positions, _mean_position
+
+    p_end = [(0, 10, "1p36.33"), (10, 20, "1p36.32")]
+    p_mid = [(0, 10, "1p34.1"), (10, 20, "1p33"), (20, 30, "5q31.1")]
+    assert _mean_position(_band_positions(p_end, "chr1")) < _mean_position(
+        _band_positions(p_mid, "chr1")
+    )
+    assert len(_band_positions(p_mid, "chr1")) == 2
