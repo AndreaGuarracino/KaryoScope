@@ -116,12 +116,15 @@ logger = logging.getLogger(__name__)
     default="plain",
     show_default=True,
     help="How to read chromosome identity and arm out of a feature label. "
-    "'plain' takes the chromosome set's label as the chromosome and asks "
-    "get_simple_region for the arm. 'cytoband' parses both off a cytoband label "
-    "(Yq12 -> chrY, q arm), which is the only reliable arm signal on chromosomes "
-    "whose arms are largely satellite: the region set routes every satellite "
-    "class into its centromere catch-all, leaving chrY only ~35% arm-labelled "
-    "against ~98% under cytoband. Point --db at a cytoband database to use it.",
+    "'plain' (default, unchanged behaviour) takes the chromosome set's label as "
+    "the chromosome and asks get_simple_region for the arm. 'cytoband' is "
+    "EXPERIMENTAL: it parses both off a cytoband label (Yq12 -> chrY, q arm) so "
+    "that satellite-rich arms such as Yq12 still count as arm material for the "
+    "orientation vote (the region set routes every satellite class into its "
+    "centromere catch-all). It is not yet validated against a verified flip list, "
+    "and cytoband resolves acrocentric short arms worse than the region set "
+    "(30-48% arm-labelled), so flips there may get worse. Point --db at a "
+    "cytoband database to use it.",
 )
 @click.option(
     "--telo-motif",

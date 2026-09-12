@@ -275,11 +275,12 @@ def find_largest_contiguous_region(
 ) -> tuple[int, int]:
     """Find the longest run of bins compatible with ``main_chromosome``.
 
-    A bin is *compatible* if its feature is the main chromosome
-    itself, an internal hierarchy node (anything not in
-    ``chromosome_leaves``), ``"novel"``, or ``"categorized"`` (the
-    hierarchy root). A run is *contiguous* if consecutive bins abut
-    (``prev.end == next.start``).
+    A bin is *compatible* if its feature belongs to the main chromosome
+    (``grammar.chromosome_of(label) == main_chromosome`` -- the label itself
+    under the plain grammar, ``1p11`` -> ``chr1`` under cytoband), is an
+    internal hierarchy node (anything not in ``chromosome_leaves``),
+    ``"novel"``, or ``"categorized"`` (the hierarchy root). A run is
+    *contiguous* if consecutive bins abut (``prev.end == next.start``).
 
     Returns ``(start, end)`` of the longest compatible-and-contiguous
     block, in source coordinates. Falls back to the full extent of
@@ -291,7 +292,7 @@ def find_largest_contiguous_region(
 
     def _compatible(name: str) -> bool:
         return (
-            name == main_chromosome
+            grammar.chromosome_of(name) == main_chromosome
             or name not in chromosome_leaves
             or name == "novel"
             or name == "categorized"
